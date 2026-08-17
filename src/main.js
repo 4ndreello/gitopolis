@@ -447,6 +447,7 @@ function rebuildGround() {
   groundRoot.clear();
 
   const far = Math.max(layout.gw, layout.gh) * 4 + 60;
+  rainSpan = Math.max(40, Math.max(layout.gw, layout.gh) + 12);
   const base = new THREE.Mesh(new THREE.PlaneGeometry(far, far), terrainMat);
   base.rotation.x = -Math.PI / 2;
   base.position.y = -0.04;
@@ -658,6 +659,7 @@ const cloudMat = new THREE.MeshLambertMaterial({
   depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0xf7f9fb,
 });
 const clouds = [];
+let cloudsOn = true;   // flipped by window.__toggle("clouds")
 {
   const geo = new THREE.PlaneGeometry(1, 1);
   for (let i = 0; i < 8; i++) {
@@ -695,6 +697,45 @@ function spawnDust(x, y, z, n, spread) {
       life: 1,
     });
   }
+}
+
+// ---- rain ----
+// drops recycle forever and never change count, so unlike dust they need no
+// per-particle object: the position buffer is the state.
+const RAIN_MAX = 1400;
+const rainPos = new Float32Array(RAIN_MAX * 3);
+const rainVel = new Float32Array(RAIN_MAX);
+for (let i = 0; i < RAIN_MAX; i++) {
+  rainPos[i * 3 + 1] = -1;                    // below ground, so it recycles on frame one
+  rainVel[i] = 9 + rand01(i * 4.1) * 5;
+}
+let rainSpan = 60;                            // full width of the drop box, set with the ground
+const rainGeo = new THREE.BufferGeometry();
+rainGeo.setAttribute("position", new THREE.BufferAttribute(rainPos, 3));
+const rainPoints = new THREE.Points(rainGeo, new THREE.PointsMaterial({
+  size: 0.11, color: 0xa8bcca, transparent: true, opacity: 0.5,
+  depthWrite: false, fog: false,
+}));
+rainPoints.frustumCulled = false;
+rainPoints.visible = false;
+scene.add(rainPoints);
+
+function updateRain(dt, amount) {
+  const n = Math.round(RAIN_MAX * Math.min(1, Math.max(0, amount)));
+  rainPoints.visible = n > 0;
+  if (!n) return;
+  for (let i = 0; i < n; i++) {
+    const y = rainPos[i * 3 + 1] - rainVel[i] * dt;
+    if (y < 0) {
+      rainPos[i * 3] = (Math.random() - 0.5) * rainSpan;
+      rainPos[i * 3 + 2] = (Math.random() - 0.5) * rainSpan;
+      rainPos[i * 3 + 1] = 18 + Math.random() * 10;
+    } else {
+      rainPos[i * 3 + 1] = y;
+    }
+  }
+  rainGeo.setDrawRange(0, n);
+  rainGeo.attributes.position.needsUpdate = true;
 }
 
 function fileWorld(f) {
@@ -742,7 +783,7 @@ function lerpStop(a, b, t, key) {
   _c1.setHex(a[key]); _c2.setHex(b[key]);
   return _c1.lerp(_c2, t);
 }
-function applyTime(t) {
+function applyTime(t, weather) {
   let a, b, k;
   if (t < 0.25) { a = DAY.night; b = DAY.dawn; k = t / 0.25; }
   else if (t < 0.5) { a = DAY.dawn; b = DAY.noon; k = (t - 0.25) / 0.25; }
@@ -753,9 +794,13 @@ function applyTime(t) {
   skyUniforms.cHorizon.value.copy(lerpStop(a, b, k, "hor"));
   skyUniforms.cBottom.value.copy(lerpStop(a, b, k, "bot"));
   sun.color.copy(lerpStop(a, b, k, "sun"));
-  sun.intensity = THREE.MathUtils.lerp(a.si, b.si, k);
+  // weather scales the clear-sky baseline here, in the one function that owns
+  // these values. fog.far in particular is only ever written by frameCamera, so
+  // scaling it in place from the loop would decay it to zero within a second.
+  sun.intensity = THREE.MathUtils.lerp(a.si, b.si, k) * (1 - weather.rain * 0.55 - weather.overcast * 0.15);
   hemi.intensity = THREE.MathUtils.lerp(a.hemi, b.hemi, k);
   scene.fog.color.copy(lerpStop(a, b, k, "fog"));
+  scene.fog.far = fogFar * (1 - weather.rain * 0.35);
 
   const day = THREE.MathUtils.clamp((t - 0.18) / 0.64, 0, 1);
   const elev = THREE.MathUtils.degToRad(6 + Math.sin(day * Math.PI) * 62);
@@ -907,17 +952,22 @@ function tick(ts) {
     }
   }
 
+  const weather = weatherAt(dayIndex(Date.now()));
   const lim = Math.max(110, Math.max(layout.gw, layout.gh) * 1.2);
-  for (const c of clouds) {
+  const deck = Math.round(3 + weather.overcast * 5);
+  clouds.forEach((c, i) => {
     c.position.x += c.userData.speed * dt * 2.4;
     if (c.position.x > lim) c.position.x = -lim;
-  }
+    c.visible = cloudsOn && i < deck;
+  });
 
   updateCars(dt, trafficAt(t));
   // people show up a little before the cars and linger a little later
   updatePedestrians(dt, Math.min(1, trafficAt(t - 0.02) * 1.15));
-  applyTime(t);
-  updateNightSky(t, weatherAt(dayIndex(Date.now())).overcast);
+  applyTime(t, weather);
+  updateNightSky(t, weather.overcast);
+  updateRain(dt, weather.rain);
+  cloudMat.opacity = 0.62 + weather.overcast * 0.33;
 
   if (idleTimer > 0) {
     idleTimer += dt;
@@ -956,11 +1006,11 @@ window.__time = (t) => { frozenT = t; };
 window.__toggle = (what) => {
   if (what === "dust") dustPoints.visible = !dustPoints.visible;
   if (what === "cars") cars.visible = !cars.visible;
-  if (what === "clouds") for (const c of clouds) c.visible = !c.visible;
+  if (what === "clouds") cloudsOn = !cloudsOn;
   if (what === "city") cityRoot.visible = !cityRoot.visible;
   if (what === "ground") groundRoot.visible = !groundRoot.visible;
 };
 
 frameCamera();
-applyTime(dayT(Date.now()));
+applyTime(dayT(Date.now()), weatherAt(dayIndex(Date.now())));
 requestAnimationFrame(tick);
