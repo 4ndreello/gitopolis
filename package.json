@@ -1,0 +1,18 @@
+{
+  "name": "repo-city",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.js --bundle --format=iife --target=es2020 --outfile=bundle.js",
+    "dev": "esbuild src/main.js --bundle --format=iife --target=es2020 --outfile=bundle.js --watch",
+    "start": "node server.mjs",
+    "test": "node test.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  },
+  "dependencies": {
+    "three": "^0.185.1"
+  }
+}
