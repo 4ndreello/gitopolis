@@ -96,6 +96,49 @@ scene.add(new THREE.Mesh(
   })
 ));
 
+// ---- night sky ----
+// inside the dome (radius 420), fog off so they do not wash out at the horizon
+const stars = (() => {
+  const N = 700, R = 380;
+  const pos = new Float32Array(N * 3);
+  for (let i = 0; i < N; i++) {
+    const a = rand01(i * 1.7) * Math.PI * 2;
+    const y = 0.05 + rand01(i * 3.1) * 0.95;        // upper hemisphere only
+    const rxz = Math.sqrt(Math.max(0, 1 - y * y));
+    pos[i * 3] = Math.cos(a) * rxz * R;
+    pos[i * 3 + 1] = y * R;
+    pos[i * 3 + 2] = Math.sin(a) * rxz * R;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+  const m = new THREE.Points(geo, new THREE.PointsMaterial({
+    // sizeAttenuation:false makes gl_PointSize device pixels, so it has to be
+    // scaled by the same ratio the renderer uses or stars go sub-pixel on hidpi
+    size: 1.8 * Math.min(2, window.devicePixelRatio || 1),
+    sizeAttenuation: false, color: 0xdfe8f5,
+    transparent: true, opacity: 0, depthWrite: false, fog: false,
+  }));
+  m.frustumCulled = false;
+  return m;
+})();
+const moon = new THREE.Mesh(
+  new THREE.SphereGeometry(8, 16, 12),
+  new THREE.MeshBasicMaterial({ color: 0xe6ecf6, fog: false })
+);
+moon.visible = false;
+scene.add(stars, moon);
+
+function updateNightSky(t, overcast) {
+  const night = Math.pow(Math.max(0, Math.cos(t * Math.PI * 2)), 0.7);   // 1 at midnight
+  stars.material.opacity = night * (1 - overcast * 0.9);
+  stars.visible = stars.material.opacity > 0.01;
+  moon.visible = night > 0.05 && overcast < 0.85;
+  if (moon.visible) {
+    const a = t * Math.PI * 2;
+    moon.position.set(Math.sin(a) * 270, 40 + night * 200, -Math.cos(a) * 270);
+  }
+}
+
 const hemi = new THREE.HemisphereLight(0xcfe0ef, 0x5a5348, 0.75);
 scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff0dc, 2.3);
@@ -874,6 +917,7 @@ function tick(ts) {
   // people show up a little before the cars and linger a little later
   updatePedestrians(dt, Math.min(1, trafficAt(t - 0.02) * 1.15));
   applyTime(t);
+  updateNightSky(t, weatherAt(dayIndex(Date.now())).overcast);
 
   if (idleTimer > 0) {
     idleTimer += dt;
