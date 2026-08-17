@@ -649,11 +649,18 @@ function updatePedestrians(dt, density) {
 // overcast now tints the puffs grey instead of fading them, so there is no
 // transparency to sort.
 // ============================================================
-const GEO_PUFF = new THREE.IcosahedronGeometry(1, 0);
+// detail 2, not 0: at detail 0 the twenty facets are big enough to count at
+// this camera distance and the puffs read as dice rather than vapour.
+const GEO_PUFF = new THREE.IcosahedronGeometry(1, 2);
 const CLOUD_Y = 12;                     // floor of the deck; tallest tower is under 5
 const CLOUD_CLEAR = new THREE.Color(0xf7f9fb);
-const CLOUD_OVERCAST = new THREE.Color(0xa8b3bf);
-const cloudMat = new THREE.MeshLambertMaterial({ color: 0xf7f9fb, flatShading: true, fog: false });
+const CLOUD_OVERCAST = new THREE.Color(0x8791a0);
+// the emissive floor is doing real work: the hemisphere light's ground colour is
+// a dark brown, so an unlit underside goes almost black and the puff reads as
+// rock. clouds are lit from below by bounced sky in a way lambert cannot know.
+const cloudMat = new THREE.MeshLambertMaterial({
+  color: 0xf7f9fb, emissive: 0x424b57, flatShading: true, fog: false,
+});
 const clouds = [];
 let cloudsOn = true;   // flipped by window.__toggle("clouds")
 for (let i = 0; i < 8; i++) {
@@ -662,14 +669,17 @@ for (let i = 0; i < 8; i++) {
   const puffs = 4 + Math.floor(rand01(i * 1.9) * 3);
   for (let j = 0; j < puffs; j++) {
     const p = new THREE.Mesh(GEO_PUFF, cloudMat);
-    const r = s * (0.20 + rand01(i * 7 + j * 3.7) * 0.16);
+    // fatter puffs packed tighter than before: when they barely touch, the
+    // intersection line lands on the silhouette and reads as two rocks glued
+    // together. overlapping well past their centres hides the seam inside.
+    const r = s * (0.26 + rand01(i * 7 + j * 3.7) * 0.16);
     p.scale.set(r, r * 0.62, r);      // squashed: a sphere reads as a balloon
     p.position.set(
-      (rand01(i * 5 + j * 2.1) - 0.5) * s * 0.9,
-      (rand01(i * 3 + j * 8.3) - 0.5) * s * 0.16,
-      (rand01(i * 11 + j * 4.9) - 0.5) * s * 0.6
+      (rand01(i * 5 + j * 2.1) - 0.5) * s * 0.62,
+      (rand01(i * 3 + j * 8.3) - 0.5) * s * 0.12,
+      (rand01(i * 11 + j * 4.9) - 0.5) * s * 0.42
     );
-    // spin each puff so the 20 facets do not line up across the cluster
+    // spin each puff so the facets do not line up across the cluster
     p.rotation.set(rand01(i + j * 2.7) * 3, rand01(i + j * 5.3) * 3, 0);
     p.castShadow = true;
     g.add(p);
