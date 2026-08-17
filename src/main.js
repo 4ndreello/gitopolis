@@ -194,7 +194,6 @@ const facadeMats = PATTERNS.map((_, pi) => FACADE.map(hex => new THREE.MeshStand
   roughness: pi === 2 ? 0.85 : 0.72,
   metalness: pi === 0 ? 0.12 : 0.02,
 })));
-const allFacadeMats = facadeMats.flat();
 
 const HOUSE = ["#d8d2c6", "#cfd4cd", "#dcd0c4", "#c9cfd6", "#d5cbc8"];
 const houseMats = HOUSE.map(hex => new THREE.MeshStandardMaterial({ color: new THREE.Color(hex), roughness: 0.88 }));
@@ -255,9 +254,13 @@ function makeBuilding(f) {
   const house = isHouse(floors);
   const group = new THREE.Group();
 
+  // ponytail: one cloned material per building. clone() shares the textures by
+  // reference, so this costs a uniform block each and no extra draw call. if a
+  // 2k-file repo ever stutters, instance by (pattern, colour) instead.
+  const facade = house ? null : facadeMats[pat][idx].clone();
   const body = house
     ? new THREE.Mesh(GEO_BOX, houseMats[seed % houseMats.length])
-    : new THREE.Mesh(bodyGeo(floors), facadeMats[pat][idx]);
+    : new THREE.Mesh(bodyGeo(floors), facade);
   body.castShadow = body.receiveShadow = true;
   group.add(body);
 
@@ -270,7 +273,7 @@ function makeBuilding(f) {
 
   let cap = null;
   if (!house && floors > 8) {
-    cap = new THREE.Mesh(bodyGeo(Math.max(2, Math.round(floors * 0.3))), facadeMats[pat][idx]);
+    cap = new THREE.Mesh(bodyGeo(Math.max(2, Math.round(floors * 0.3))), facade);
     cap.castShadow = true;
     group.add(cap);
   }
@@ -307,6 +310,7 @@ function makeBuilding(f) {
     w: (house ? 0.80 : 0.70) + rand01(seed) * 0.12,
     d: (house ? 0.80 : 0.70) + rand01(seed + 7) * 0.12,
     spin: rand01(seed + 3) * Math.PI * 2,
+    facade, lit: 0,
   };
   buildings.set(f.path, b);
   cityRoot.add(group);
@@ -317,10 +321,11 @@ function disposeBuilding(path) {
   const b = buildings.get(path);
   if (!b) return;
   cityRoot.remove(b.group);
+  if (b.facade) b.facade.dispose();   // cloned per building, so nothing else holds it
   buildings.delete(path);
 }
 
-function updateBuilding(f) {
+function updateBuilding(f, t, dt) {
   let b = buildings.get(f.path);
   const floors = floorsOf(f.bytes);
   if (b && b.floors !== floors) { disposeBuilding(f.path); b = null; }
@@ -381,6 +386,14 @@ function updateBuilding(f) {
     b.crane.children[1].position.set(b.w * 0.75 + 0.45, mh, b.d * 0.75);
     b.crane.children[2].scale.set(0.12, 0.12, 0.12);
     b.crane.children[2].position.set(b.w * 0.75, mh - 0.12, b.d * 0.75);
+  }
+
+  if (b.facade) {
+    // ease rather than snap: a window coming on over a fraction of a second
+    // reads as somebody flicking a switch; an instant flip reads as a bug
+    const want = litAt(f.path, t) * 0.85;
+    b.lit += (want - b.lit) * Math.min(1, dt * 2.5);
+    b.facade.emissiveIntensity = b.lit;
   }
 }
 
@@ -607,10 +620,10 @@ function frameCamera() {
 // time of day
 // ============================================================
 const DAY = {
-  dawn:  { top: 0x527099, hor: 0xe6bb98, bot: 0x8e8781, sun: 0xffc089, si: 1.5, hemi: 0.55,  lit: 0.18, fog: 0xd6bfab },
-  noon:  { top: 0x5f92c9, hor: 0xdce7ee, bot: 0xb0bcc6, sun: 0xfff4e2, si: 2.05, hemi: 0.9, lit: 0.0,  fog: 0xcfdae2 },
-  dusk:  { top: 0x39496b, hor: 0xd9a077, bot: 0x6a6467, sun: 0xffa96b, si: 1.5, hemi: 0.42, lit: 0.45, fog: 0xb79c8b },
-  night: { top: 0x101b2c, hor: 0x24334a, bot: 0x171d28, sun: 0xa8bcd8, si: 0.4, hemi: 0.26, lit: 0.9,  fog: 0x1a2331 },
+  dawn:  { top: 0x527099, hor: 0xe6bb98, bot: 0x8e8781, sun: 0xffc089, si: 1.5, hemi: 0.55, fog: 0xd6bfab },
+  noon:  { top: 0x5f92c9, hor: 0xdce7ee, bot: 0xb0bcc6, sun: 0xfff4e2, si: 2.05, hemi: 0.9, fog: 0xcfdae2 },
+  dusk:  { top: 0x39496b, hor: 0xd9a077, bot: 0x6a6467, sun: 0xffa96b, si: 1.5, hemi: 0.42, fog: 0xb79c8b },
+  night: { top: 0x101b2c, hor: 0x24334a, bot: 0x171d28, sun: 0xa8bcd8, si: 0.4, hemi: 0.26, fog: 0x1a2331 },
 };
 const _c1 = new THREE.Color(), _c2 = new THREE.Color();
 function lerpStop(a, b, t, key) {
@@ -631,8 +644,6 @@ function applyTime(t) {
   sun.intensity = THREE.MathUtils.lerp(a.si, b.si, k);
   hemi.intensity = THREE.MathUtils.lerp(a.hemi, b.hemi, k);
   scene.fog.color.copy(lerpStop(a, b, k, "fog"));
-  const lit = THREE.MathUtils.lerp(a.lit, b.lit, k);
-  for (const m of allFacadeMats) m.emissiveIntensity = lit;
 
   const day = THREE.MathUtils.clamp((t - 0.18) / 0.64, 0, 1);
   const elev = THREE.MathUtils.degToRad(6 + Math.sin(day * Math.PI) * 62);
@@ -758,7 +769,7 @@ function tick(ts) {
         continue;
       }
     }
-    updateBuilding(f);
+    updateBuilding(f, t, dt);
   }
 
   let n = 0;
@@ -817,6 +828,7 @@ window.__city = () => ({
   growing: [...files.values()].filter(f => f.grown < 1).length,
   dying: [...files.values()].filter(f => f.dying).length,
   cranes: [...buildings.values()].filter(b => b.crane.visible).length,
+  lit: [...buildings.values()].filter(b => b.lit > 0.4).length,
   minGrown: Math.min(...[...files.values()].map(f => f.grown)),
   dust: dust.length,
   districts: layout.districts,
