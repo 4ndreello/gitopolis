@@ -128,3 +128,22 @@ export function planCity(files) {
     pos, empty, blocks,
   };
 }
+
+// ---- clock ----
+// five real minutes is one in-game day. derived straight from the wall clock,
+// so there is no epoch to store and a reload lands on the same hour.
+export const DAY_MS = 300000;
+
+export function dayT(now) {
+  return (((now % DAY_MS) + DAY_MS) % DAY_MS) / DAY_MS;
+}
+
+export function dayIndex(now) {
+  return Math.floor(now / DAY_MS);
+}
+
+export function clockLabel(t) {
+  const mins = Math.floor(t * 1440) % 1440;
+  const h = String(Math.floor(mins / 60)).padStart(2, "0");
+  return `${h}:${String(mins % 60).padStart(2, "0")}`;
+}

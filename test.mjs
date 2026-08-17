@@ -1,7 +1,7 @@
 // smallest thing that fails if the derivation breaks.
 // run: node test.mjs
 import assert from "node:assert/strict";
-import { dirKey, floorsOf, planCity, isHouse } from "./src/city.js";
+import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel } from "./src/city.js";
 
 // --- dirKey drops the basename before truncating ---
 assert.equal(dirKey("src/main.tsx"), "src", "a file directly in src belongs to src, not to its own district");
@@ -78,5 +78,24 @@ const REPO = [
   assert.equal(plan.blocks.length, plan.dcols * plan.drows, "every grid cell must be a block or a park");
   assert.ok(plan.blocks.some(b => b.park) || plan.districts === plan.dcols * plan.drows);
 }
+
+// --- the in-game clock wraps and never lies about the hour ---
+assert.equal(dayT(0), 0, "epoch is midnight");
+assert.equal(dayT(DAY_MS / 2), 0.5, "half a day");
+assert.equal(dayT(DAY_MS), 0, "the day wraps");
+assert.equal(dayT(12345), dayT(12345 + DAY_MS * 7), "same point in every day");
+for (const ms of [0, 1, 99999, 300001, 1e12]) {
+  assert.ok(dayT(ms) >= 0 && dayT(ms) < 1, `dayT stays in [0,1) for ${ms}`);
+}
+
+assert.equal(dayIndex(0), 0);
+assert.equal(dayIndex(DAY_MS - 1), 0);
+assert.equal(dayIndex(DAY_MS), 1);
+
+assert.equal(clockLabel(0), "00:00");
+assert.equal(clockLabel(0.25), "06:00");
+assert.equal(clockLabel(0.5), "12:00");
+assert.equal(clockLabel(0.9999), "23:59");
+assert.notEqual(clockLabel(1), "24:00", "the label never reads 24:00");
 
 console.log("ok — all city derivation checks passed");
