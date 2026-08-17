@@ -183,9 +183,11 @@ const server = createServer(async (req, res) => {
     clients.add(res);
     req.on("close", () => clients.delete(res));
     try {
-      const snap = await scan();
-      lastPayload = JSON.stringify(snap);
-      res.write(`data: ${lastPayload}\n\n`);
+      // deliberately not touching lastPayload: it is the dedup baseline for
+      // every client, and setting it here on behalf of one arrival suppressed
+      // the post-switch broadcast to all the others. a duplicate frame to this
+      // one client is harmless — snapshots are idempotent.
+      res.write(`data: ${JSON.stringify(await scan())}\n\n`);
     } catch (err) {
       res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
     }
