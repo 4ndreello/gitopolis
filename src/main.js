@@ -662,15 +662,36 @@ function setStatus(text, ok) {
   el.status.dataset.ok = ok ? "1" : "0";
 }
 
-const es = new EventSource("/events");
-es.onopen = () => setStatus("ligado", true);
-es.onerror = () => setStatus("sem conexão", false);
-es.onmessage = (ev) => {
-  const snap = JSON.parse(ev.data);
-  if (snap.error) { setStatus(snap.error, false); return; }
-  setStatus("ligado", true);
-  ingest(snap);
-};
+// switching repos does not clear local state on purpose: ingest already marks
+// every vanished file as dying, so the old city crumbles while the new one
+// rises under scaffolding. the transition comes for free.
+let es = null;
+function connect(name) {
+  if (es) es.close();
+  es = new EventSource(name ? `/events?repo=${encodeURIComponent(name)}` : "/events");
+  es.onopen = () => setStatus("ligado", true);
+  es.onerror = () => setStatus("sem conexão", false);
+  es.onmessage = (ev) => {
+    const snap = JSON.parse(ev.data);
+    if (snap.error) { setStatus(snap.error, false); return; }
+    setStatus("ligado", true);
+    ingest(snap);
+  };
+}
+
+fetch("/repos")
+  .then(r => r.json())
+  .then(names => {
+    for (const name of names) {
+      const o = document.createElement("option");
+      o.value = o.textContent = name;
+      el.repo.append(o);
+    }
+    connect(names[0]);
+  })
+  .catch(() => connect(null));
+
+el.repo.addEventListener("change", () => connect(el.repo.value));
 
 // ============================================================
 // loop

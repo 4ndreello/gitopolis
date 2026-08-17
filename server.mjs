@@ -3,20 +3,42 @@
 
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
-import { watch, statSync, readFileSync } from "node:fs";
+import { watch, statSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { resolve, join, extname } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
 
-const REPO = resolve(process.argv[2] || ".");
+const ROOT = resolve(process.argv[2] || ".");
 const PORT = Number(process.env.PORT || 4173);
-const ROOT = import.meta.dirname;
+const WEB_ROOT = import.meta.dirname;
+
+// the argument is a root: itself if it is a repo, plus any direct child that
+// is one. one level deep only — walking further turns `~/` into a long crawl.
+function listRepos(root) {
+  const out = [];
+  if (existsSync(join(root, ".git"))) out.push({ name: root.split("/").pop(), path: root });
+  let entries = [];
+  try {
+    entries = readdirSync(root, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory() || e.name.startsWith(".")) continue;
+    const p = join(root, e.name);
+    if (existsSync(join(p, ".git"))) out.push({ name: e.name, path: p });
+  }
+  return out;
+}
+
+const REPOS = listRepos(ROOT);
+let active = REPOS[0] || null;
 
 const MIME = { ".html": "text/html", ".js": "text/javascript", ".css": "text/css", ".svg": "image/svg+xml" };
 
 async function git(args) {
-  const { stdout } = await run("git", args, { cwd: REPO, maxBuffer: 32 * 1024 * 1024 });
+  const { stdout } = await run("git", args, { cwd: active.path, maxBuffer: 32 * 1024 * 1024 });
   return stdout;
 }
 
@@ -43,6 +65,7 @@ function parseStatus(out) {
 }
 
 async function scan() {
+  if (!active) return { repo: null, branch: "", files: [] };
   // -c cached + -o others, --exclude-standard honours .gitignore for free.
   // that one flag is what keeps node_modules from becoming 40k buildings.
   const [listOut, statusOut, branchOut] = await Promise.all([
@@ -59,7 +82,7 @@ async function scan() {
     seen.add(path);
     let st;
     try {
-      st = statSync(join(REPO, path));
+      st = statSync(join(active.path, path));
     } catch {
       continue; // deleted but still tracked -> no building, which is correct
     }
@@ -67,7 +90,7 @@ async function scan() {
     files.push({ path, bytes: st.size, mtime: st.mtimeMs, dirty: dirty.has(path) });
   }
 
-  return { repo: REPO.split("/").pop(), branch: branchOut.trim(), files };
+  return { repo: active.name, branch: branchOut.trim(), files };
 }
 
 // ---- clients ----
@@ -96,16 +119,33 @@ function schedule(delay) {
 }
 
 // fast path: content edits. .git churn is ignored here and covered by the poll.
-try {
-  watch(REPO, { recursive: true }, (_evt, name) => {
-    if (!name) return;
-    const p = name.replaceAll("\\", "/");
-    if (p.startsWith(".git/") || p === ".git" || p.includes("node_modules/")) return;
-    schedule(140);
-  });
-} catch (err) {
-  console.warn("recursive watch unavailable, polling only:", err.message);
+let watcher = null;
+function startWatch() {
+  if (watcher) { watcher.close(); watcher = null; }
+  if (!active) return;
+  try {
+    watcher = watch(active.path, { recursive: true }, (_evt, name) => {
+      if (!name) return;
+      const p = name.replaceAll("\\", "/");
+      if (p.startsWith(".git/") || p === ".git" || p.includes("node_modules/")) return;
+      schedule(140);
+    });
+  } catch (err) {
+    console.warn("recursive watch unavailable, polling only:", err.message);
+  }
 }
+
+// ponytail: one active repo for the whole process. make it per-client only if
+// two windows on two different projects ever actually matter.
+function setActive(repo) {
+  if (!repo || (active && repo.path === active.path)) return;
+  active = repo;
+  lastPayload = null;   // the next snapshot must go out even if it looks familiar
+  startWatch();
+  schedule(0);
+}
+
+startWatch();
 
 // commits, checkouts and stashes touch refs in .git subdirectories, so no
 // single non-recursive watch catches them reliably — a plain poll does.
@@ -117,7 +157,24 @@ setInterval(() => schedule(0), 700);
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost");
 
+  if (url.pathname === "/repos") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify(REPOS.map(r => r.name)));
+    return;
+  }
+
   if (url.pathname === "/events") {
+    // the name is looked up in the list we already built; it is never joined
+    // into a path, which is what keeps this from being a traversal hole.
+    const want = url.searchParams.get("repo");
+    if (want) {
+      const found = REPOS.find(r => r.name === want);
+      if (!found) {
+        res.writeHead(400).end("unknown repo");
+        return;
+      }
+      setActive(found);
+    }
     res.writeHead(200, {
       "Content-Type": "text/event-stream",
       "Cache-Control": "no-cache",
@@ -141,7 +198,7 @@ const server = createServer(async (req, res) => {
     return;
   }
   try {
-    const body = readFileSync(join(ROOT, file));
+    const body = readFileSync(join(WEB_ROOT, file));
     res.writeHead(200, { "Content-Type": MIME[extname(file)] || "application/octet-stream" });
     res.end(body);
   } catch {
@@ -150,6 +207,6 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`repo-city watching ${REPO}`);
+  console.log(`repo-city: ${REPOS.length} repo(s) under ${ROOT}`);
   console.log(`open http://localhost:${PORT}`);
 });
