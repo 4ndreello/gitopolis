@@ -103,7 +103,9 @@ const stars = (() => {
   const pos = new Float32Array(N * 3);
   for (let i = 0; i < N; i++) {
     const a = rand01(i * 1.7) * Math.PI * 2;
-    const y = 0.05 + rand01(i * 3.1) * 0.95;        // upper hemisphere only
+    // cubed so the field crowds the low band the camera can actually reach
+    // (see the moon note below); still spread to the zenith, just thinner there
+    const y = 0.02 + Math.pow(rand01(i * 3.1), 3) * 0.98;
     const rxz = Math.sqrt(Math.max(0, 1 - y * y));
     pos[i * 3] = Math.cos(a) * rxz * R;
     pos[i * 3 + 1] = y * R;
@@ -134,8 +136,17 @@ function updateNightSky(t, overcast) {
   stars.visible = stars.material.opacity > 0.01;
   moon.visible = night > 0.05 && overcast < 0.85;
   if (moon.visible) {
+    // the camera can never look up. CAM_ANGLE 52 holds the top of the default
+    // frame 36 deg BELOW the horizon, and even at controls.maxPolarAngle (80)
+    // it only reaches ~6 deg above it — measured, not guessed. so the moon
+    // rides a deliberately low arc: at 2.2..5 deg it lands at ndc.y 0.7..0.93,
+    // just under the top edge. do not "clean up" this elevation without also
+    // changing CAM_ANGLE, or the moon leaves the frame for good. the 2.2 floor
+    // is what keeps the whole 8-unit sphere above the ground plane.
     const a = t * Math.PI * 2;
-    moon.position.set(Math.sin(a) * 270, 40 + night * 200, -Math.cos(a) * 270);
+    const R = 270, elev = THREE.MathUtils.degToRad(2.2 + night * 2.8);
+    const rxz = R * Math.cos(elev);
+    moon.position.set(Math.sin(a) * rxz, Math.sin(elev) * R, -Math.cos(a) * rxz);
   }
 }
 
