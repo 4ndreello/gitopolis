@@ -517,12 +517,16 @@ function rebuildCars() {
 }
 
 const _cm = new THREE.Matrix4();
-function updateCars(dt) {
+function updateCars(dt, density) {
   if (!cars) return;
   const items = cars.userData.items;
-  for (let i = 0; i < items.length; i++) {
+  // spare instances are hidden with count, never makeScale(0,0,0): a zero scale
+  // gives a singular normal matrix and the driver draws garbage triangles
+  cars.count = Math.max(0, Math.round(items.length * density));
+  const pace = 0.35 + density * 0.9;
+  for (let i = 0; i < cars.count; i++) {
     const it = items[i];
-    it.t += it.speed * dt;
+    it.t += it.speed * pace * dt;
     if (it.t > it.span) it.t -= it.span;
     const p = it.t - it.span / 2;
     if (it.lane.axis === "x") {
@@ -801,7 +805,7 @@ function tick(ts) {
     if (c.position.x > lim) c.position.x = -lim;
   }
 
-  updateCars(dt);
+  updateCars(dt, trafficAt(t));
   applyTime(t);
 
   if (idleTimer > 0) {
@@ -832,6 +836,7 @@ window.__city = () => ({
   minGrown: Math.min(...[...files.values()].map(f => f.grown)),
   dust: dust.length,
   districts: layout.districts,
+  cars: cars ? cars.count : 0,
   fps,
 });
 // freeze the clock at a fixed hour for screenshots; pass null to resume
