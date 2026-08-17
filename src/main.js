@@ -3,6 +3,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   GUT, FLOOR_H, MAX_FLOORS,
   hash, rand01, dirKey, extOf, floorsOf, isHouse, planCity,
+  dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt,
 } from "./city.js";
 
 // ============================================================
@@ -37,7 +38,8 @@ function ingest(snapshot) {
   for (const [path, f] of files) {
     if (!seen.has(path) && !f.dying) f.dying = 0.001;
   }
-  hud(snapshot);
+  if (snapshot.repo && el.repo.value !== snapshot.repo) el.repo.value = snapshot.repo;
+  el.branch.textContent = snapshot.branch || "?";
 }
 
 // ============================================================
@@ -580,13 +582,14 @@ function fileWorld(f) {
 // ============================================================
 // camera framing
 // ============================================================
-const angleEl = document.getElementById("angle");
-const timeEl = document.getElementById("time");
+const CAM_ANGLE = 52;        // degrees above the horizon; drag the scene to change it
+let fogFar = 200;            // clear-sky baseline, captured below and scaled by weather
+let frozenT = null;          // set by window.__time() to hold a fixed hour
 
 function frameCamera() {
   const r = Math.max(layout.gw, layout.gh) * 0.72 + 6;
   controls.target.set(0, Math.min(6, r * 0.1), 0);
-  const polar = THREE.MathUtils.degToRad(90 - Number(angleEl.value));
+  const polar = THREE.MathUtils.degToRad(90 - CAM_ANGLE);
   const dist = r / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 0.62;
   const az = Math.atan2(camera.position.x - controls.target.x, camera.position.z - controls.target.z) || 0.7;
   camera.position.set(
@@ -596,9 +599,9 @@ function frameCamera() {
   );
   controls.update();
   scene.fog.near = dist * 0.95;
-  scene.fog.far = dist * 4.2;
+  fogFar = dist * 4.2;
+  scene.fog.far = fogFar;
 }
-angleEl.addEventListener("input", frameCamera);
 
 // ============================================================
 // time of day
@@ -649,24 +652,11 @@ function applyTime(t) {
 // hud + feed
 // ============================================================
 const el = {
-  repo: document.getElementById("r-repo"),
+  repo: document.getElementById("repo"),
   branch: document.getElementById("r-branch"),
-  files: document.getElementById("r-files"),
-  districts: document.getElementById("r-dist"),
-  dirty: document.getElementById("r-dirty"),
+  clock: document.getElementById("r-clock"),
   status: document.getElementById("r-status"),
 };
-function hud(snapshot) {
-  if (snapshot) {
-    el.repo.textContent = snapshot.repo || "?";
-    el.branch.textContent = snapshot.branch || "?";
-  }
-  el.files.textContent = files.size;
-  el.districts.textContent = layout.districts;
-  let d = 0;
-  for (const f of files.values()) if (f.dirty) d++;
-  el.dirty.textContent = d;
-}
 function setStatus(text, ok) {
   el.status.textContent = text;
   el.status.dataset.ok = ok ? "1" : "0";
@@ -686,7 +676,7 @@ es.onmessage = (ev) => {
 // loop
 // ============================================================
 let last = 0, clock = 0, fpsAcc = 0, fpsN = 0;
-const fpsEl = document.getElementById("r-fps");
+let fps = 0;
 
 function resize() {
   const r = canvas.getBoundingClientRect();
@@ -701,13 +691,13 @@ function tick(ts) {
   const dt = Math.min(0.05, (ts - last) / 1000 || 0);
   last = ts;
   clock += dt;
+  const t = frozenT ?? dayT(Date.now());
 
   if (layoutDirty) {
     layout = planCity([...files.values()]);
     layoutDirty = false;
     rebuildGround();
     frameCamera();
-    hud(null);
   }
 
   for (const [path, f] of files) {
@@ -780,7 +770,7 @@ function tick(ts) {
   }
 
   updateCars(dt);
-  applyTime(Number(timeEl.value));
+  applyTime(t);
 
   if (idleTimer > 0) {
     idleTimer += dt;
@@ -791,8 +781,8 @@ function tick(ts) {
 
   fpsAcc += dt; fpsN++;
   if (fpsAcc > 0.5) {
-    fpsEl.textContent = Math.round(fpsN / fpsAcc);
-    hud(null);
+    fps = Math.round(fpsN / fpsAcc);
+    el.clock.textContent = clockLabel(t);
     fpsAcc = 0; fpsN = 0;
   }
 
@@ -808,7 +798,11 @@ window.__city = () => ({
   cranes: [...buildings.values()].filter(b => b.crane.visible).length,
   minGrown: Math.min(...[...files.values()].map(f => f.grown)),
   dust: dust.length,
+  districts: layout.districts,
+  fps,
 });
+// freeze the clock at a fixed hour for screenshots; pass null to resume
+window.__time = (t) => { frozenT = t; };
 window.__toggle = (what) => {
   if (what === "dust") dustPoints.visible = !dustPoints.visible;
   if (what === "cars") cars.visible = !cars.visible;
@@ -817,6 +811,6 @@ window.__toggle = (what) => {
   if (what === "ground") groundRoot.visible = !groundRoot.visible;
 };
 
-applyTime(Number(timeEl.value));
 frameCamera();
+applyTime(dayT(Date.now()));
 requestAnimationFrame(tick);
