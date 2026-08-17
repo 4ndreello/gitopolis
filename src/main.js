@@ -459,6 +459,7 @@ function rebuildGround() {
 
   rebuildTrees();
   rebuildCars();
+  rebuildPedestrians();
 }
 
 function rebuildTrees() {
@@ -539,6 +540,70 @@ function updateCars(dt, density) {
     cars.setMatrixAt(i, _cm);
   }
   cars.instanceMatrix.needsUpdate = true;
+}
+
+// pedestrians walk the perimeter of each block plate. a walker's position is a
+// single number: distance travelled around a square ring.
+const GEO_PED = new THREE.BoxGeometry(0.07, 0.18, 0.07);
+const pedMat = new THREE.MeshStandardMaterial({ color: 0x2f3540, roughness: 0.9 });
+let peds = null;
+
+// returns [x, z, side]; side is which of the four kerbs the walker is on
+function ringAt(ring, t) {
+  const s = ((t % ring.per) + ring.per) % ring.per;
+  const side = Math.floor(s / (ring.half * 2));
+  const u = (s % (ring.half * 2)) - ring.half;
+  if (side === 0) return [u, -ring.half, 0];
+  if (side === 1) return [ring.half, u, 1];
+  if (side === 2) return [-u, ring.half, 2];
+  return [-ring.half, -u, 3];
+}
+
+function rebuildPedestrians() {
+  if (peds) { scene.remove(peds); peds = null; }
+  // the plate is scaled to size + 0.24, so a ring at size + 0.10 sits on it.
+  // anything wider lands on the curb, which is 0.027 lower — and the walkers
+  // then visibly hover.
+  const rings = layout.blocks.map(blk => {
+    const { x, z } = worldPos(blk.bx + (blk.size - 1) / 2, blk.by + (blk.size - 1) / 2);
+    const half = (blk.size + 0.10) / 2;
+    return { x, z, half, per: half * 8 };
+  });
+  if (!rings.length) return;
+
+  const max = Math.min(260, rings.length * 8);
+  peds = new THREE.InstancedMesh(GEO_PED, pedMat, max);
+  peds.castShadow = true;
+  peds.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  peds.userData.walkers = [];
+  for (let i = 0; i < max; i++) {
+    const ring = rings[i % rings.length];
+    peds.userData.walkers.push({
+      ring,
+      t: rand01(i * 2.3) * ring.per,
+      speed: 0.45 + rand01(i * 5.9) * 0.35,
+      dir: i % 2 ? 1 : -1,
+    });
+  }
+  scene.add(peds);
+}
+
+const _pm = new THREE.Matrix4();
+function updatePedestrians(dt, density) {
+  if (!peds) return;
+  const w = peds.userData.walkers;
+  peds.count = Math.max(0, Math.round(w.length * density));
+  for (let i = 0; i < peds.count; i++) {
+    const p = w[i];
+    p.t += p.speed * p.dir * dt;
+    const [ox, oz, side] = ringAt(p.ring, p.t);
+    // face along the kerb being walked. side 0 heads +x, 1 heads +z, 2 heads -x,
+    // 3 heads -z, which is (1 - side) quarter turns; reversed walkers add half.
+    _pm.makeRotationY((1 - side) * Math.PI / 2 + (p.dir > 0 ? 0 : Math.PI));
+    _pm.setPosition(p.ring.x + ox, 0.20, p.ring.z + oz);
+    peds.setMatrixAt(i, _pm);
+  }
+  peds.instanceMatrix.needsUpdate = true;
 }
 
 // ============================================================
@@ -806,6 +871,8 @@ function tick(ts) {
   }
 
   updateCars(dt, trafficAt(t));
+  // people show up a little before the cars and linger a little later
+  updatePedestrians(dt, Math.min(1, trafficAt(t - 0.02) * 1.15));
   applyTime(t);
 
   if (idleTimer > 0) {
@@ -837,6 +904,7 @@ window.__city = () => ({
   dust: dust.length,
   districts: layout.districts,
   cars: cars ? cars.count : 0,
+  peds: peds ? peds.count : 0,
   fps,
 });
 // freeze the clock at a fixed hour for screenshots; pass null to resume
