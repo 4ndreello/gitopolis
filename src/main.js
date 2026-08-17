@@ -217,26 +217,6 @@ const LIT_PATTERNS = [
   (g, S) => { g.fillStyle = "#000"; g.fillRect(0, 0, S, S); g.fillStyle = "#e0a552"; g.fillRect(10, 12, 18, S - 30); },
   (g, S) => { g.fillStyle = "#000"; g.fillRect(0, 0, S, S); g.fillStyle = "#d4923c"; g.fillRect(9, 13, S - 18, (S - 28) / 2 - 2); },
 ];
-function cloudTexture() {
-  const S = 256, c = document.createElement("canvas");
-  c.width = c.height = S;
-  const g = c.getContext("2d");
-  for (let i = 0; i < 9; i++) {
-    const x = S * (0.2 + rand01(i * 5.1) * 0.6);
-    const y = S * (0.32 + rand01(i * 9.7) * 0.36);
-    const r = S * (0.1 + rand01(i * 3.3) * 0.16);
-    const grd = g.createRadialGradient(x, y, 0, x, y, r);
-    grd.addColorStop(0, "rgba(255,255,255,0.95)");
-    grd.addColorStop(0.55, "rgba(255,255,255,0.7)");
-    grd.addColorStop(1, "rgba(255,255,255,0)");
-    g.fillStyle = grd;
-    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.colorSpace = THREE.SRGBColorSpace;
-  return t;
-}
-
 // ---- materials ----
 const FACADE = ["#d2d7dd", "#c6d0cb", "#dbcfbe", "#bcc6d2", "#d5c8c8", "#c8d1c0", "#c8c1cf", "#dcd5c4"];
 const TEX_WIN = PATTERNS.map(mkTex);
@@ -662,28 +642,45 @@ function updatePedestrians(dt, density) {
 }
 
 // ============================================================
-// clouds — alphaTest is high so only the dense core casts shadow;
-// a low value throws one huge hard blob across the whole city
+// clouds — flat-shaded puff clusters, like the cone trees and box buildings.
+// they used to be one horizontal textured quad each, which read as a paper
+// cutout to a camera that always looks down, and needed alphaTest 0.62 to stop
+// its shadow being a hard blob. solid geometry needs no such trick, and
+// overcast now tints the puffs grey instead of fading them, so there is no
+// transparency to sort.
 // ============================================================
-const cloudMat = new THREE.MeshLambertMaterial({
-  map: cloudTexture(), transparent: true, alphaTest: 0.62, opacity: 0.88,
-  depthWrite: false, side: THREE.DoubleSide, fog: false, color: 0xf7f9fb,
-});
+const GEO_PUFF = new THREE.IcosahedronGeometry(1, 0);
+const CLOUD_Y = 12;                     // floor of the deck; tallest tower is under 5
+const CLOUD_CLEAR = new THREE.Color(0xf7f9fb);
+const CLOUD_OVERCAST = new THREE.Color(0xa8b3bf);
+const cloudMat = new THREE.MeshLambertMaterial({ color: 0xf7f9fb, flatShading: true, fog: false });
 const clouds = [];
 let cloudsOn = true;   // flipped by window.__toggle("clouds")
-{
-  const geo = new THREE.PlaneGeometry(1, 1);
-  for (let i = 0; i < 8; i++) {
-    const c = new THREE.Mesh(geo, cloudMat);
-    c.rotation.x = -Math.PI / 2;
-    c.castShadow = true;
-    const s = 9 + rand01(i * 4.4) * 13;
-    c.scale.set(s, s * 0.7, 1);
-    c.position.set(-80 + rand01(i * 2.2) * 160, 26 + rand01(i * 8.1) * 9, -80 + rand01(i * 5.5) * 160);
-    c.userData.speed = 0.5 + rand01(i * 6.7) * 0.8;
-    scene.add(c);
-    clouds.push(c);
+for (let i = 0; i < 8; i++) {
+  const g = new THREE.Group();
+  const s = 9 + rand01(i * 4.4) * 13;
+  const puffs = 4 + Math.floor(rand01(i * 1.9) * 3);
+  for (let j = 0; j < puffs; j++) {
+    const p = new THREE.Mesh(GEO_PUFF, cloudMat);
+    const r = s * (0.20 + rand01(i * 7 + j * 3.7) * 0.16);
+    p.scale.set(r, r * 0.62, r);      // squashed: a sphere reads as a balloon
+    p.position.set(
+      (rand01(i * 5 + j * 2.1) - 0.5) * s * 0.9,
+      (rand01(i * 3 + j * 8.3) - 0.5) * s * 0.16,
+      (rand01(i * 11 + j * 4.9) - 0.5) * s * 0.6
+    );
+    // spin each puff so the 20 facets do not line up across the cluster
+    p.rotation.set(rand01(i + j * 2.7) * 3, rand01(i + j * 5.3) * 3, 0);
+    p.castShadow = true;
+    g.add(p);
   }
+  // ponytail: cloud height is a tuning knob, not a derived value. the camera
+  // looks down at the city and can only be dragged to ~6 degrees above the
+  // horizon, so clouds parked high are simply never in frame.
+  g.position.set(-80 + rand01(i * 2.2) * 160, CLOUD_Y + rand01(i * 8.1) * 7, -80 + rand01(i * 5.5) * 160);
+  g.userData.speed = 0.5 + rand01(i * 6.7) * 0.8;
+  scene.add(g);
+  clouds.push(g);
 }
 
 // ============================================================
@@ -978,7 +975,7 @@ function tick(ts) {
   applyTime(t, weather);
   updateNightSky(t, weather.overcast);
   updateRain(dt, weather.rain);
-  cloudMat.opacity = 0.62 + weather.overcast * 0.33;
+  cloudMat.color.copy(CLOUD_CLEAR).lerp(CLOUD_OVERCAST, weather.overcast);
 
   if (idleTimer > 0) {
     idleTimer += dt;
