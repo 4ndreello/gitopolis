@@ -150,14 +150,18 @@ export function planCity(files) {
 // the traffic lanes, the painted strips, the crosswalks and the lamp posts —
 // when they each computed it themselves they drifted apart by a curb width.
 // `at` is the fixed coordinate of the road centreline; `span` is its length.
+// the half plot: a cell of `block` columns has its plots on integer centres
+// `bx .. bx+block-1`, so it spans block-1, not block. centring the road on the
+// cell gap put it half a plot into the next block — the paint ended up under
+// that block's kerb and the lamp posts on its lawn.
 export function roadLines(layout) {
   const stride = layout.block + GUT;
   const lines = [];
   for (let r = 1; r < layout.drows; r++) {
-    lines.push({ axis: "x", at: r * stride - GUT / 2 - layout.gh / 2, span: layout.gw + 3 });
+    lines.push({ axis: "x", at: r * stride - (GUT + 1) / 2 - layout.gh / 2, span: layout.gw + 3 });
   }
   for (let c = 1; c < layout.dcols; c++) {
-    lines.push({ axis: "z", at: c * stride - GUT / 2 - layout.gw / 2, span: layout.gh + 3 });
+    lines.push({ axis: "z", at: c * stride - (GUT + 1) / 2 - layout.gw / 2, span: layout.gh + 3 });
   }
   return lines;
 }

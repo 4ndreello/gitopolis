@@ -87,6 +87,13 @@ grid is computed. Traffic lanes, painted strips, crosswalks and lamp posts all r
 when the lane list was computed inline in `rebuildCars` it drifted from everything else by
 a curb width.
 
+A cell is `block` columns wide, but its plots sit on integer centres `bx .. bx+block-1`,
+so it only *spans* `block - 1`. `roadLines` centred the road on the cell gap
+(`r*stride - GUT/2`) instead of between the plot columns (`r*stride - (GUT+1)/2`), which
+put every street half a plot into the next block: two thirds of the paint ended up buried
+under that block's kerb and the far row of lamp posts stood on its lawn. `test.mjs` now
+asserts a road is equidistant from the plot column on each side.
+
 The gutter is `GUT` (1.35) wide but the curb ring overhangs `0.31` on each side, so only
 `ROAD_W` (0.73) is asphalt anyone can see. Paint outside that is paint under a kerb — the
 first version of the edge lines was invisible for exactly this reason. Anything drawn on

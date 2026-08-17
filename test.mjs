@@ -1,7 +1,7 @@
 // smallest thing that fails if the derivation breaks.
 // run: node test.mjs
 import assert from "node:assert/strict";
-import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK } from "./src/city.js";
+import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT } from "./src/city.js";
 
 // --- dirKey drops the basename before truncating ---
 assert.equal(dirKey("src/main.tsx"), "src", "a file directly in src belongs to src, not to its own district");
@@ -146,6 +146,25 @@ assert.ok(weatherAt(42).rain >= 0 && weatherAt(42).rain <= 1);
   }
   assert.equal(intersections(layout).length,
     lines.filter(l => l.axis === "x").length * lines.filter(l => l.axis === "z").length);
+
+  // a street sits midway between the two rows of buildings it separates. plots
+  // are integer centres, so a cell of `block` columns spans block-1, not block:
+  // centring the road on the cell gap instead pushed it half a plot into the
+  // next block, which buried the paint under that block's kerb and stood its
+  // lamp posts on the lawn.
+  {
+    const stride = layout.block + GUT;
+    const dist = (a, b) => Math.abs(a - b);
+    for (const l of lines) {
+      const half = l.axis === "x" ? layout.gh / 2 : layout.gw / 2;
+      const g = l.at + half;                       // back to grid coordinates
+      const r = Math.round((g + (GUT + 1) / 2) / stride);
+      const near = (r - 1) * stride + layout.block - 1;   // last plot column before the road
+      const far = r * stride;                            // first plot column after it
+      assert.ok(Math.abs(dist(g, near) - dist(g, far)) < 1e-9,
+        `road at ${g} is ${dist(g, near)} from one kerb and ${dist(g, far)} from the other`);
+    }
+  }
 
   // a repo small enough to be one district has no gaps, so no roads and no cars
   assert.deepEqual(roadLines(planCity(mk(["a.txt", "b.txt"]))), []);
