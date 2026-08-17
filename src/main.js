@@ -4,7 +4,12 @@ import {
   GUT, FLOOR_H, MAX_FLOORS,
   hash, rand01, dirKey, extOf, floorsOf, isHouse, planCity,
   dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt,
+  roadLines, intersections, nightK,
 } from "./city.js";
+import {
+  TEX_GLOW, GEO_CAR, GEO_VAN, GEO_TRUCK, GEO_LAMP, GEO_BUSSTOP, GEO_BIN,
+  GEO_HYDRANT, GEO_SIGNPOST, mkSignTex, mkRoadTex, mkZebraTex, mkPoolTex,
+} from "./props.js";
 
 // ============================================================
 // state: one entry per file on disk. animation fields live here and
@@ -241,8 +246,28 @@ const terrainMat = new THREE.MeshStandardMaterial({ color: 0x5d6a55, roughness: 
 const plateMat = new THREE.MeshStandardMaterial({ color: 0x9aa096, roughness: 0.9 });
 const curbMat = new THREE.MeshStandardMaterial({ color: 0xb6bab2, roughness: 0.92 });
 const parkMat = new THREE.MeshStandardMaterial({ color: 0x6f8259, roughness: 0.95 });
-const carMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.35, metalness: 0.35 });
+// vertexColors + emissiveMap is what lets one material serve every prop: the
+// mesh carries its own colours, and the 3-texel glow strip decides which faces
+// light up at night. instanceColor then tints only the parts painted white.
+const vehicleMat = new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.42, metalness: 0.3,
+  emissiveMap: TEX_GLOW, emissive: new THREE.Color(0xffffff), emissiveIntensity: 0,
+});
+const streetMat = new THREE.MeshStandardMaterial({
+  vertexColors: true, roughness: 0.72, metalness: 0.15,
+  emissiveMap: TEX_GLOW, emissive: new THREE.Color(0xffe6b8), emissiveIntensity: 0,
+});
 const CAR_COLORS = [0xd8d8dc, 0x2f3540, 0xa33c33, 0x2c5f8a, 0xc9a24a, 0x5d6b53, 0x8f8f96];
+const TEX_ROAD = mkRoadTex();
+const roadMat = new THREE.MeshStandardMaterial({ map: TEX_ROAD, roughness: 0.95 });
+const zebraMat = new THREE.MeshStandardMaterial({
+  map: mkZebraTex(), transparent: true, depthWrite: false, roughness: 0.95,
+});
+// additive: the pool brightens asphalt instead of painting a grey disc on it
+const poolMat = new THREE.MeshBasicMaterial({
+  map: mkPoolTex(), transparent: true, depthWrite: false, opacity: 0,
+  blending: THREE.AdditiveBlending, fog: false,
+});
 const scaffoldMat = new THREE.MeshStandardMaterial({ color: 0xe8a13a, roughness: 0.6, metalness: 0.2 });
 const craneMat = new THREE.MeshStandardMaterial({ color: 0xf0b455, roughness: 0.5, metalness: 0.3 });
 const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b5540, roughness: 0.9 });
@@ -254,7 +279,18 @@ const GEO_MAST = new THREE.CylinderGeometry(0.035, 0.035, 1, 6);
 const GEO_PYR = new THREE.ConeGeometry(1, 1, 4);
 const GEO_TRUNK = new THREE.CylinderGeometry(0.05, 0.07, 0.34, 5);
 const GEO_LEAF = new THREE.ConeGeometry(0.26, 0.72, 7);
-const GEO_CAR = new THREE.BoxGeometry(0.2, 0.13, 0.4);
+const GEO_QUAD = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+
+// everything painted on or standing beside the asphalt shares one stack of
+// heights. they are millimetres apart on purpose: coplanar quads z-fight, and
+// the artefact only shows up once the camera is far enough away to matter.
+const Y_ROAD_X = 0.005, Y_ROAD_Z = 0.0055, Y_ZEBRA = 0.007, Y_POOL = 0.009;
+const Y_KERB = 0.083;         // top of the curb ring — where street furniture stands
+// the curb ring is drawn at size + 0.62, so it eats 0.31 of the gutter on each
+// side. only what is left is asphalt anyone can see, and paint outside it is
+// paint under a kerb.
+const KERB_OVER = 0.31;
+const ROAD_W = GUT - KERB_OVER * 2;
 
 // uv scaled per floor count, so one texture tile == one storey
 const bodyGeoCache = new Map();
@@ -299,7 +335,10 @@ function makeBuilding(f) {
   group.add(body);
 
   const roof = house
-    ? new THREE.Mesh(GEO_PYR, tileRoofMats[(seed >> 3) % tileRoofMats.length])
+    // >>> not >>: hash() is unsigned 32-bit, and a signed shift of anything
+    // above 2^31 goes negative, indexing off the end and leaving the mesh with
+    // three's default white material — the flat white roofs
+    ? new THREE.Mesh(GEO_PYR, tileRoofMats[(seed >>> 3) % tileRoofMats.length])
     : new THREE.Mesh(GEO_BOX, roofMat);
   roof.castShadow = true;
   if (house) roof.rotation.y = Math.PI / 4;
@@ -412,14 +451,20 @@ function updateBuilding(f, t, dt) {
       pole.scale.set(0.045, sh, 0.045);
       pole.position.set(off[i][0] * b.w * 0.58, sh / 2, off[i][1] * b.d * 0.58);
     });
+    // the crane sweeps a circle around its own plot, so its reach is the one
+    // part of a building that can end up over the street. at a mast on the plot
+    // corner and a 1.9-long jib that circle had a radius of 2.1 — two plots —
+    // and a repo under construction drew a thicket of orange bars across every
+    // road. pulled in to ~1.2, which still overhangs the kerb like a real one.
     const mh = h + 1.5;
+    const mx = b.w * 0.62, mz = b.d * 0.62;
     b.crane.rotation.y = b.spin + clock * 0.12;
     b.crane.children[0].scale.set(1, mh, 1);
-    b.crane.children[0].position.set(b.w * 0.75, mh / 2, b.d * 0.75);
-    b.crane.children[1].scale.set(1.9, 0.045, 0.045);
-    b.crane.children[1].position.set(b.w * 0.75 + 0.45, mh, b.d * 0.75);
-    b.crane.children[2].scale.set(0.12, 0.12, 0.12);
-    b.crane.children[2].position.set(b.w * 0.75, mh - 0.12, b.d * 0.75);
+    b.crane.children[0].position.set(mx, mh / 2, mz);
+    b.crane.children[1].scale.set(0.95, 0.04, 0.04);
+    b.crane.children[1].position.set(mx + 0.22, mh, mz);
+    b.crane.children[2].scale.set(0.1, 0.1, 0.1);
+    b.crane.children[2].position.set(mx, mh - 0.1, mz);
   }
 
   if (b.facade) {
@@ -434,8 +479,15 @@ function updateBuilding(f, t, dt) {
 // ============================================================
 // ground, parks, traffic
 // ============================================================
+// road strips and street signs allocate per layout (a strip's uv scale and a
+// sign's text both depend on it), so they must be released when the layout
+// changes. groundRoot.clear() only detaches — it never frees GPU memory.
+let disposables = [];
+
 function rebuildGround() {
   groundRoot.clear();
+  for (const d of disposables) d.dispose();
+  disposables = [];
 
   const far = Math.max(layout.gw, layout.gh) * 4 + 60;
   rainSpan = Math.max(40, Math.max(layout.gw, layout.gh) + 12);
@@ -455,37 +507,41 @@ function rebuildGround() {
   // exact counts per material. hiding spare instances with makeScale(0,0,0)
   // yields a singular normal matrix -> NaN -> the driver draws garbage
   // triangles, which showed up as big white quads over the city.
-  const parkBlocks = layout.blocks.filter(b => b.park);
   const cityBlocks = layout.blocks.filter(b => !b.park);
+  // a district smaller than its cell only paves its own rectangle; the rest of
+  // the cell is lawn, so a two-file district reads as a garden square rather
+  // than as an acre of empty concrete.
+  const lawnBlocks = layout.blocks.filter(b => b.park || b.inner.size < b.size);
   const curbs = new THREE.InstancedMesh(GEO_BOX, curbMat, layout.blocks.length);
   const plates = new THREE.InstancedMesh(GEO_BOX, plateMat, Math.max(1, cityBlocks.length));
-  const parks = new THREE.InstancedMesh(GEO_BOX, parkMat, Math.max(1, parkBlocks.length));
+  const parks = new THREE.InstancedMesh(GEO_BOX, parkMat, Math.max(1, lawnBlocks.length));
   for (const im of [curbs, plates, parks]) { im.receiveShadow = true; im.castShadow = false; }
   plates.count = cityBlocks.length;
-  parks.count = parkBlocks.length;
+  parks.count = lawnBlocks.length;
 
   const m = new THREE.Matrix4();
-  const place = (blk) => {
-    const size = blk.size;
-    const cx = blk.bx + (size - 1) / 2 - layout.gw / 2;
-    const cz = blk.by + (size - 1) / 2 - layout.gh / 2;
-    return { size, cx, cz };
-  };
+  const place = (bx, by, size) => ({
+    size,
+    cx: bx + (size - 1) / 2 - layout.gw / 2,
+    cz: by + (size - 1) / 2 - layout.gh / 2,
+  });
   layout.blocks.forEach((blk, i) => {
-    const { size, cx, cz } = place(blk);
+    const { size, cx, cz } = place(blk.bx, blk.by, blk.size);
     m.makeScale(size + 0.62, 0.11, size + 0.62);
     m.setPosition(cx, 0.028, cz);
     curbs.setMatrixAt(i, m);
   });
   cityBlocks.forEach((blk, i) => {
-    const { size, cx, cz } = place(blk);
+    const { size, cx, cz } = place(blk.inner.bx, blk.inner.by, blk.inner.size);
     m.makeScale(size + 0.24, 0.14, size + 0.24);
     m.setPosition(cx, 0.04, cz);
     plates.setMatrixAt(i, m);
   });
-  parkBlocks.forEach((blk, i) => {
-    const { size, cx, cz } = place(blk);
-    m.makeScale(size + 0.24, 0.14, size + 0.24);
+  lawnBlocks.forEach((blk, i) => {
+    const { size, cx, cz } = place(blk.bx, blk.by, blk.size);
+    // 0.13 tall, not 0.14: the lawn passes under the paving of its own block,
+    // and two boxes with the same top face z-fight across the whole cell
+    m.makeScale(size + 0.24, 0.13, size + 0.24);
     m.setPosition(cx, 0.04, cz);
     parks.setMatrixAt(i, m);
   });
@@ -493,12 +549,186 @@ function rebuildGround() {
   groundRoot.add(curbs, plates, parks);
 
   rebuildTrees();
+  rebuildRoads();
+  rebuildLamps();
+  rebuildFurniture();
   rebuildCars();
   rebuildPedestrians();
 }
 
+// ---- roads ----
+// the asphalt plane underneath already fills every gap; these strips only add
+// the paint, which is why intersections need no special geometry.
+function rebuildRoads() {
+  const lines = roadLines(layout);
+  if (!lines.length) return;
+
+  for (const l of lines) {
+    // uv.x scaled by the span keeps one texture tile at one world unit, so the
+    // dashes stay the same length whatever size the city is
+    const geo = new THREE.PlaneGeometry(l.span, ROAD_W).rotateX(-Math.PI / 2);
+    const uv = geo.attributes.uv;
+    for (let i = 0; i < uv.count; i++) uv.setX(i, uv.getX(i) * l.span);
+    uv.needsUpdate = true;
+    disposables.push(geo);
+
+    const mesh = new THREE.Mesh(geo, roadMat);
+    mesh.receiveShadow = true;
+    if (l.axis === "x") mesh.position.set(0, Y_ROAD_X, l.at);
+    else { mesh.rotation.y = Math.PI / 2; mesh.position.set(l.at, Y_ROAD_Z, 0); }
+    groundRoot.add(mesh);
+  }
+
+  const cross = intersections(layout);
+  if (!cross.length) return;
+  // four approaches per intersection, each stopping short of the junction
+  const zebras = new THREE.InstancedMesh(GEO_QUAD, zebraMat, cross.length * 4);
+  zebras.receiveShadow = true;
+  const m = new THREE.Matrix4();
+  const zscale = new THREE.Vector3(ROAD_W, 1, 0.26);
+  const off = ROAD_W / 2 + 0.13;
+  let i = 0;
+  for (const c of cross) {
+    for (const [dx, dz, turn] of [[0, -1, 0], [0, 1, 0], [-1, 0, 1], [1, 0, 1]]) {
+      m.makeRotationY(turn * Math.PI / 2);
+      m.scale(zscale);
+      m.setPosition(c.x + dx * off, Y_ZEBRA, c.z + dz * off);
+      zebras.setMatrixAt(i++, m);
+    }
+  }
+  zebras.instanceMatrix.needsUpdate = true;
+  groundRoot.add(zebras);
+}
+
+// ---- lamp posts ----
+// spaced along both kerbs of every road, arm turned over the asphalt.
+let pools = null;
+function rebuildLamps() {
+  pools = null;
+  const lines = roadLines(layout);
+  if (!lines.length) return;
+
+  // posts stand on the curb strip: outside the asphalt, inside the block plate.
+  // at GUT/2 - 0.1 they landed on the grass of every park block.
+  const GAP = 3.2, EDGE = ROAD_W / 2 + KERB_OVER * 0.28;
+  const spots = [];
+  for (const l of lines) {
+    for (let p = -l.span / 2 + GAP / 2; p < l.span / 2; p += GAP) {
+      // `turn` puts the arm over the road: the head is at +x of the post
+      if (l.axis === "x") {
+        spots.push({ x: p, z: l.at - EDGE, rot: -Math.PI / 2 });
+        spots.push({ x: p, z: l.at + EDGE, rot: Math.PI / 2 });
+      } else {
+        spots.push({ x: l.at - EDGE, z: p, rot: 0 });
+        spots.push({ x: l.at + EDGE, z: p, rot: Math.PI });
+      }
+    }
+  }
+  if (!spots.length) return;
+  const capped = spots.slice(0, 320);
+
+  const lamps = new THREE.InstancedMesh(GEO_LAMP, streetMat, capped.length);
+  lamps.castShadow = true;
+  pools = new THREE.InstancedMesh(GEO_QUAD, poolMat, capped.length);
+  pools.visible = false;                  // an additive quad at zero opacity still costs a draw
+  const m = new THREE.Matrix4();
+  capped.forEach((s, i) => {
+    m.makeRotationY(s.rot);
+    m.setPosition(s.x, Y_KERB, s.z);
+    lamps.setMatrixAt(i, m);
+    // the pool falls under the head, not under the post
+    m.makeScale(1.5, 1, 1.5);
+    m.setPosition(s.x + Math.cos(s.rot) * 0.19, Y_POOL, s.z - Math.sin(s.rot) * 0.19);
+    pools.setMatrixAt(i, m);
+  });
+  lamps.instanceMatrix.needsUpdate = true;
+  pools.instanceMatrix.needsUpdate = true;
+  groundRoot.add(lamps, pools);
+}
+
+// ---- street furniture ----
+// bins, hydrants, bus stops and district signs all stand on the kerb ring of a
+// block, which is the same ring the pedestrians walk — one source of truth for
+// where the pavement is.
+let signCount = 0;
+function rebuildFurniture() {
+  const blocks = layout.blocks;
+  if (!blocks.length) return;
+
+  const kerb = (blk) => {
+    const { x, z } = worldPos(blk.bx + (blk.size - 1) / 2, blk.by + (blk.size - 1) / 2);
+    return { x, z, half: (blk.size + 0.42) / 2 };
+  };
+
+  const bins = [], hydrants = [], stops = [];
+  blocks.forEach((blk, bi) => {
+    const k = kerb(blk);
+    const r = rand01(bi * 3.3);
+    // one bus stop on roughly every fourth block, on a side chosen by the block
+    if (r > 0.72) {
+      const side = Math.floor(rand01(bi * 9.1) * 4);
+      const u = (rand01(bi * 4.7) - 0.5) * k.half;
+      const at = [[u, -k.half, 0], [k.half, u, Math.PI / 2], [u, k.half, Math.PI], [-k.half, u, -Math.PI / 2]][side];
+      stops.push({ x: k.x + at[0], z: k.z + at[1], rot: at[2] });
+    }
+    for (let j = 0; j < 3; j++) {
+      const t = rand01(bi * 7.7 + j * 2.9);
+      const side = Math.floor(t * 4);
+      const u = (rand01(bi * 5.1 + j * 8.3) - 0.5) * k.half * 1.7;
+      const p = [[u, -k.half], [k.half, u], [u, k.half], [-k.half, u]][side];
+      (j === 2 ? hydrants : bins).push({ x: k.x + p[0], z: k.z + p[1] });
+    }
+  });
+
+  const m = new THREE.Matrix4();
+  const place = (geo, items) => {
+    if (!items.length) return;
+    const im = new THREE.InstancedMesh(geo, streetMat, items.length);
+    im.castShadow = true;
+    items.forEach((it, i) => {
+      m.makeRotationY(it.rot || 0);
+      m.setPosition(it.x, Y_KERB, it.z);
+      im.setMatrixAt(i, m);
+    });
+    im.instanceMatrix.needsUpdate = true;
+    groundRoot.add(im);
+  };
+  place(GEO_BIN, bins);
+  place(GEO_HYDRANT, hydrants);
+  place(GEO_BUSSTOP, stops);
+
+  // one named sign per district, on the corner nearest the origin. the plate is
+  // the only prop with per-instance text, so it is the only one that allocates.
+  const named = blocks.filter(b => b.dir);
+  signCount = named.length;
+  if (!named.length) return;
+  const posts = new THREE.InstancedMesh(GEO_SIGNPOST, streetMat, named.length);
+  posts.castShadow = true;
+  named.forEach((blk, i) => {
+    const k = kerb(blk);
+    m.makeRotationY(0);
+    m.setPosition(k.x - k.half, Y_KERB, k.z - k.half);
+    posts.setMatrixAt(i, m);
+
+    const tex = mkSignTex(blk.dir);
+    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.8, side: THREE.DoubleSide });
+    disposables.push(tex, mat);
+    const plate = new THREE.Mesh(new THREE.PlaneGeometry(0.44, 0.11), mat);
+    disposables.push(plate.geometry);
+    // the plate hangs off the post along its own width axis, which the 45°
+    // turn has already rotated — offsetting in world x alone leaves it skewered
+    plate.position.set(k.x - k.half + 0.155, Y_KERB + 0.47, k.z - k.half - 0.155);
+    plate.rotation.y = Math.PI / 4;
+    groundRoot.add(plate);
+  });
+  posts.instanceMatrix.needsUpdate = true;
+  groundRoot.add(posts);
+}
+
 function rebuildTrees() {
-  const spots = layout.empty.filter((s, i) => s.park || i % 3 === 0).slice(0, 420);
+  // the cap is per city, so it has to clear the lawn of every sparse district
+  // at once — at 420 the last blocks came out as bare green sheets
+  const spots = layout.empty.filter((s, i) => s.park || i % 3 === 0).slice(0, 1200);
   if (!spots.length) return;
   const trunks = new THREE.InstancedMesh(GEO_TRUNK, trunkMat, spots.length);
   const leaves = new THREE.InstancedMesh(GEO_LEAF, leafMat, spots.length);
@@ -519,62 +749,84 @@ function rebuildTrees() {
   groundRoot.add(trunks, leaves);
 }
 
-// traffic: movement on the ground is what stops it reading as a model kit
-let cars = null;
+// traffic: movement on the ground is what stops it reading as a model kit.
+// one InstancedMesh per body type, all driving the same lane list — a car, a
+// van and a truck cannot share a geometry, but they can share the loop.
+const VEHICLES = [
+  { geo: GEO_CAR, share: 0.62, speed: [1.8, 1.9] },
+  { geo: GEO_VAN, share: 0.24, speed: [1.5, 1.4] },
+  { geo: GEO_TRUCK, share: 0.14, speed: [1.1, 0.9] },   // heavy and slow, so it holds a lane
+];
+let traffic = [];
+
 function rebuildCars() {
-  if (cars) { scene.remove(cars); cars = null; }
+  for (const t of traffic) scene.remove(t.mesh);
+  traffic = [];
+
   const lanes = [];
-  const stride = layout.block + GUT;
-  for (let r = 1; r < layout.drows; r++) {
-    const z = r * stride - GUT / 2 - layout.gh / 2;
-    lanes.push({ axis: "x", at: z - 0.3, dir: 1 }, { axis: "x", at: z + 0.3, dir: -1 });
-  }
-  for (let c = 1; c < layout.dcols; c++) {
-    const x = c * stride - GUT / 2 - layout.gw / 2;
-    lanes.push({ axis: "z", at: x - 0.3, dir: -1 }, { axis: "z", at: x + 0.3, dir: 1 });
+  // half a carriageway either side of the centre dash. at the old 0.3 the wide
+  // side of a truck hung over the kerb.
+  const OFF = ROAD_W / 4;
+  for (const l of roadLines(layout)) {
+    if (l.axis === "x") lanes.push({ axis: "x", at: l.at - OFF, dir: 1, span: l.span }, { axis: "x", at: l.at + OFF, dir: -1, span: l.span });
+    else lanes.push({ axis: "z", at: l.at - OFF, dir: -1, span: l.span }, { axis: "z", at: l.at + OFF, dir: 1, span: l.span });
   }
   if (!lanes.length) return;
 
-  const count = Math.min(90, lanes.length * 4);
-  cars = new THREE.InstancedMesh(GEO_CAR, carMat, count);
-  cars.castShadow = true;
-  cars.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  const total = Math.min(90, lanes.length * 4);
   const col = new THREE.Color();
-  cars.userData.items = [];
-  for (let i = 0; i < count; i++) {
-    const lane = lanes[i % lanes.length];
-    const span = lane.axis === "x" ? layout.gw + 3 : layout.gh + 3;
-    cars.userData.items.push({ lane, span, t: rand01(i * 3.7) * span, speed: 1.6 + rand01(i * 7.3) * 1.8 });
-    col.setHex(CAR_COLORS[i % CAR_COLORS.length]);
-    cars.setColorAt(i, col);
-  }
-  if (cars.instanceColor) cars.instanceColor.needsUpdate = true;
-  scene.add(cars);
+  let n = 0;
+  VEHICLES.forEach((kind, k) => {
+    const count = k === VEHICLES.length - 1 ? total - n : Math.round(total * kind.share);
+    if (count <= 0) return;
+    const mesh = new THREE.InstancedMesh(kind.geo, vehicleMat, count);
+    mesh.castShadow = true;
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    const items = [];
+    for (let i = 0; i < count; i++) {
+      const seed = n + i;
+      const lane = lanes[seed % lanes.length];
+      items.push({
+        lane,
+        t: rand01(seed * 3.7) * lane.span,
+        speed: kind.speed[0] + rand01(seed * 7.3) * kind.speed[1],
+      });
+      col.setHex(CAR_COLORS[seed % CAR_COLORS.length]);
+      mesh.setColorAt(i, col);
+    }
+    if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true;
+    mesh.userData.items = items;
+    scene.add(mesh);
+    traffic.push({ mesh, items });
+    n += count;
+  });
 }
 
 const _cm = new THREE.Matrix4();
-function updateCars(dt, density) {
-  if (!cars) return;
-  const items = cars.userData.items;
-  // spare instances are hidden with count, never makeScale(0,0,0): a zero scale
-  // gives a singular normal matrix and the driver draws garbage triangles
-  cars.count = Math.max(0, Math.round(items.length * density));
+function updateCars(dt, density, night) {
+  vehicleMat.emissiveIntensity = night;
   const pace = 0.35 + density * 0.9;
-  for (let i = 0; i < cars.count; i++) {
-    const it = items[i];
-    it.t += it.speed * pace * dt;
-    if (it.t > it.span) it.t -= it.span;
-    const p = it.t - it.span / 2;
-    if (it.lane.axis === "x") {
-      _cm.makeRotationY(it.lane.dir > 0 ? Math.PI / 2 : -Math.PI / 2);
-      _cm.setPosition(p * it.lane.dir, 0.07, it.lane.at);
-    } else {
-      _cm.makeRotationY(it.lane.dir > 0 ? 0 : Math.PI);
-      _cm.setPosition(it.lane.at, 0.07, p * it.lane.dir);
+  for (const { mesh, items } of traffic) {
+    // spare instances are hidden with count, never makeScale(0,0,0): a zero scale
+    // gives a singular normal matrix and the driver draws garbage triangles
+    mesh.count = Math.max(0, Math.round(items.length * density));
+    for (let i = 0; i < mesh.count; i++) {
+      const it = items[i];
+      it.t += it.speed * pace * dt;
+      if (it.t > it.lane.span) it.t -= it.lane.span;
+      const p = it.t - it.lane.span / 2;
+      // the body points along +z, so a lane running x is a quarter turn away
+      if (it.lane.axis === "x") {
+        _cm.makeRotationY(it.lane.dir > 0 ? Math.PI / 2 : -Math.PI / 2);
+        _cm.setPosition(p * it.lane.dir, 0.005, it.lane.at);
+      } else {
+        _cm.makeRotationY(it.lane.dir > 0 ? 0 : Math.PI);
+        _cm.setPosition(it.lane.at, 0.005, p * it.lane.dir);
+      }
+      mesh.setMatrixAt(i, _cm);
     }
-    cars.setMatrixAt(i, _cm);
+    mesh.instanceMatrix.needsUpdate = true;
   }
-  cars.instanceMatrix.needsUpdate = true;
 }
 
 // pedestrians walk the perimeter of each block plate. a walker's position is a
@@ -646,8 +898,8 @@ function updatePedestrians(dt, density) {
 // they used to be one horizontal textured quad each, which read as a paper
 // cutout to a camera that always looks down, and needed alphaTest 0.62 to stop
 // its shadow being a hard blob. solid geometry needs no such trick, and
-// overcast now tints the puffs grey instead of fading them, so there is no
-// transparency to sort.
+// overcast tints the puffs grey instead of fading them; the only opacity in
+// play is the camera-proximity fade below.
 // ============================================================
 // detail 2, not 0: at detail 0 the twenty facets are big enough to count at
 // this camera distance and the puffs read as dice rather than vapour.
@@ -658,15 +910,22 @@ const CLOUD_OVERCAST = new THREE.Color(0x8791a0);
 // the emissive floor is doing real work: the hemisphere light's ground colour is
 // a dark brown, so an unlit underside goes almost black and the puff reads as
 // rock. clouds are lit from below by bounced sky in a way lambert cannot know.
-const cloudMat = new THREE.MeshLambertMaterial({
-  color: 0xf7f9fb, emissive: 0x424b57, flatShading: true, fog: false,
-});
+// one material per cloud, not one shared: each fades on its own as the camera
+// gets close, so a cloud drifting through the lens goes translucent instead of
+// filling the screen with white. depthWrite stays on so the puffs inside a
+// cluster do not double-blend into a muddy blob.
+const cloudMats = [];
 const clouds = [];
 let cloudsOn = true;   // flipped by window.__toggle("clouds")
 for (let i = 0; i < 8; i++) {
   const g = new THREE.Group();
   const s = 9 + rand01(i * 4.4) * 13;
   const puffs = 4 + Math.floor(rand01(i * 1.9) * 3);
+  const cloudMat = new THREE.MeshLambertMaterial({
+    color: 0xf7f9fb, emissive: 0x424b57, flatShading: true, fog: false,
+    transparent: true, depthWrite: true,
+  });
+  cloudMats.push(cloudMat);
   for (let j = 0; j < puffs; j++) {
     const p = new THREE.Mesh(GEO_PUFF, cloudMat);
     // fatter puffs packed tighter than before: when they barely touch, the
@@ -689,6 +948,7 @@ for (let i = 0; i < 8; i++) {
   // horizon, so clouds parked high are simply never in frame.
   g.position.set(-80 + rand01(i * 2.2) * 160, CLOUD_Y + rand01(i * 8.1) * 7, -80 + rand01(i * 5.5) * 160);
   g.userData.speed = 0.5 + rand01(i * 6.7) * 0.8;
+  g.userData.r = s;
   scene.add(g);
   clouds.push(g);
 }
@@ -842,10 +1102,22 @@ const el = {
   branch: document.getElementById("r-branch"),
   clock: document.getElementById("r-clock"),
   status: document.getElementById("r-status"),
+  boot: document.getElementById("boot"),
+  bootTxt: document.getElementById("boot-txt"),
+  bootBar: document.querySelector("#boot-bar > i"),
 };
-function setStatus(text, ok) {
+function setStatus(text, state) {
   el.status.textContent = text;
-  el.status.dataset.ok = ok ? "1" : "0";
+  el.status.dataset.ok = state;
+}
+
+// "wait" = switched, snapshot not here yet; "rise" = buildings still going up.
+// null = done. the tick loop owns the "rise" -> null transition, which is what
+// lifts the boot curtain — the city is only ever revealed finished.
+let phase = null, phaseRepo = "";
+function setBoot(text, pct) {
+  if (el.bootTxt.textContent !== text) el.bootTxt.textContent = text;
+  el.bootBar.style.width = `${pct}%`;
 }
 
 // switching repos does not clear local state on purpose: ingest already marks
@@ -854,13 +1126,20 @@ function setStatus(text, ok) {
 let es = null;
 function connect(name) {
   if (es) es.close();
+  phase = "wait";
+  phaseRepo = name || "cidade";
+  el.boot.classList.remove("done");
+  setBoot(`construindo ${phaseRepo}`, 0);
   es = new EventSource(name ? `/events?repo=${encodeURIComponent(name)}` : "/events");
-  es.onopen = () => setStatus("ligado", true);
-  es.onerror = () => setStatus("sem conexão", false);
+  es.onerror = () => {
+    setStatus("sem conexão", "bad");
+    if (phase) setBoot("sem conexão", 0);
+  };
   es.onmessage = (ev) => {
     const snap = JSON.parse(ev.data);
-    if (snap.error) { setStatus(snap.error, false); return; }
-    setStatus("ligado", true);
+    if (snap.error) { setStatus(snap.error, "bad"); if (phase) setBoot(snap.error, 0); return; }
+    setStatus("ligado", "ok");
+    if (phase === "wait") phase = "rise";
     ingest(snap);
   };
 }
@@ -907,7 +1186,9 @@ function tick(ts) {
     frameCamera();
   }
 
+  let growSum = 0, growN = 0;
   for (const [path, f] of files) {
+    if (!f.dying) { growSum += f.grown; growN++; }
     const beforeFloors = floorsOf(f.bytes);
     // snap once close: the asymptotic approach can park bytes exactly on a
     // floorsOf rounding boundary, which then flips every frame — spawning dust
@@ -947,6 +1228,12 @@ function tick(ts) {
     updateBuilding(f, t, dt);
   }
 
+  if (phase === "rise") {
+    const pct = growN ? Math.floor((growSum / growN) * 100) : 100; // empty repo: nothing to raise
+    if (pct >= 100) { phase = null; setBoot(`construindo ${phaseRepo}`, 100); el.boot.classList.add("done"); }
+    else setBoot(`construindo ${phaseRepo}`, pct);
+  }
+
   let n = 0;
   for (let i = dust.length - 1; i >= 0; i--) {
     const p = dust[i];
@@ -977,15 +1264,26 @@ function tick(ts) {
     c.position.x += c.userData.speed * dt * 2.4;
     if (c.position.x > lim) c.position.x = -lim;
     c.visible = cloudsOn && i < deck;
+    // mario-style: the closer the camera is to the cluster, the more it fades,
+    // so a cloud crossing the lens never blanks the city out
+    const d = c.position.distanceTo(camera.position);
+    cloudMats[i].opacity = THREE.MathUtils.clamp((d - c.userData.r) / (c.userData.r * 1.6), 0.1, 1);
   });
 
-  updateCars(dt, trafficAt(t));
+  // headlights, lamp heads and their pools all ride the same ramp, so the
+  // street never lights up before the cars do
+  const night = nightK(t);
+  streetMat.emissiveIntensity = night;
+  poolMat.opacity = night * 0.55 * (1 - weather.rain * 0.4);
+  if (pools) pools.visible = night > 0.02;
+
+  updateCars(dt, trafficAt(t), night);
   // people show up a little before the cars and linger a little later
   updatePedestrians(dt, Math.min(1, trafficAt(t - 0.02) * 1.15));
   applyTime(t, weather);
   updateNightSky(t, weather.overcast);
   updateRain(dt, weather.rain);
-  cloudMat.color.copy(CLOUD_CLEAR).lerp(CLOUD_OVERCAST, weather.overcast);
+  for (const m of cloudMats) m.color.copy(CLOUD_CLEAR).lerp(CLOUD_OVERCAST, weather.overcast);
 
   if (idleTimer > 0) {
     idleTimer += dt;
@@ -1015,7 +1313,10 @@ window.__city = () => ({
   minGrown: Math.min(...[...files.values()].map(f => f.grown)),
   dust: dust.length,
   districts: layout.districts,
-  cars: cars ? cars.count : 0,
+  cars: traffic.reduce((n, t) => n + t.mesh.count, 0),
+  lamps: pools ? pools.count : 0,
+  signs: signCount,
+  night: +nightK(frozenT ?? dayT(Date.now())).toFixed(2),
   peds: peds ? peds.count : 0,
   fps,
 });
@@ -1023,7 +1324,7 @@ window.__city = () => ({
 window.__time = (t) => { frozenT = t; };
 window.__toggle = (what) => {
   if (what === "dust") dustPoints.visible = !dustPoints.visible;
-  if (what === "cars") cars.visible = !cars.visible;
+  if (what === "cars") for (const t of traffic) t.mesh.visible = !t.mesh.visible;
   if (what === "clouds") cloudsOn = !cloudsOn;
   if (what === "city") cityRoot.visible = !cityRoot.visible;
   if (what === "ground") groundRoot.visible = !groundRoot.visible;

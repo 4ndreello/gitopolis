@@ -33,7 +33,19 @@ body {
 #r-branch { color: var(--accent); }
 #r-clock { font-weight: 600; }
 #r-status { color: var(--bad); }
-#r-status[data-ok="1"] { display: none; }
+#r-status[data-ok="ok"] { display: none; }
+#r-status[data-ok="busy"] { color: var(--accent); }
+/* covers the canvas while the city rises, so only the finished skyline shows */
+#boot {
+  position: fixed; inset: 0; z-index: 5;
+  display: grid; place-items: center; gap: 14px; align-content: center;
+  background: #0d141c; color: var(--accent);
+  letter-spacing: 0.12em; text-transform: uppercase;
+  transition: opacity 0.7s ease;
+}
+#boot.done { opacity: 0; pointer-events: none; }
+#boot-bar { width: 180px; height: 2px; background: rgba(255, 199, 107, 0.18); }
+#boot-bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s linear; }
 </style>
 </head>
 <body>
@@ -44,7 +56,11 @@ body {
 <span id="r-branch">…</span>
 <span class="sep">·</span>
 <b id="r-clock">00:00</b>
-<span id="r-status" data-ok="0">conectando…</span>
+<span id="r-status" data-ok="busy">conectando…</span>
+</div>
+<div id="boot">
+<span id="boot-txt">conectando…</span>
+<span id="boot-bar"><i></i></span>
 </div>
 <script src="bundle.js"></script>
 </body>
