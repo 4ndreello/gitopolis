@@ -70,10 +70,48 @@ Districts are sized to their own contents (`ceil(sqrt(count))`) and centered in 
 whose pitch comes from the largest district. Leftover grid cells become parks, never
 holes in the asphalt.
 
+A block always covers its **whole cell**; `blk.inner` is the smaller rectangle the
+buildings occupy. The renderer paves `inner` and lays the rest of the cell to lawn.
+Paving only `inner` left a two-file district as a small plate marooned in the middle of
+the asphalt, which read as a city block built on top of the road.
+
 **Known ceiling:** block size and grid width derive from file count, so crossing a
 threshold reshuffles every coordinate. Invisible during normal editing, visible on a
 branch switch that adds dozens of files. Unfixed. The fixes considered were growing the
 grid in power-of-two steps, or animating the reflow as a city-wide slide.
+
+### Streets: one derivation, four consumers
+
+`roadLines(layout)` and `intersections(layout)` in `city.js` are the only place the road
+grid is computed. Traffic lanes, painted strips, crosswalks and lamp posts all read them;
+when the lane list was computed inline in `rebuildCars` it drifted from everything else by
+a curb width.
+
+The gutter is `GUT` (1.35) wide but the curb ring overhangs `0.31` on each side, so only
+`ROAD_W` (0.73) is asphalt anyone can see. Paint outside that is paint under a kerb — the
+first version of the edge lines was invisible for exactly this reason. Anything drawn on
+the road stacks on the documented `Y_*` heights in `main.js`; they are millimetres apart
+because coplanar quads z-fight.
+
+The crane is the one part of a building that can legitimately leave its plot: it sweeps a
+circle around its own plot centre. At the original mast offset and a 1.9-long jib that
+radius was 2.1 — two plots — so a repo under construction drew a thicket of orange bars
+across every road. It is now ~1.2, which overhangs the kerb and stops there. Bodies and
+scaffolding never leave the paving; if that ever looks wrong, measure before changing the
+layout.
+
+### src/props.js: procedural props
+
+Vehicles, lamp posts, bus stops, bins, hydrants and sign posts are each **one merged
+geometry** (`mergeGeometries` over boxes and cylinders), so a hundred cars are one draw
+call. Two tricks carry the file:
+
+- **vertex colour** — `instanceColor` multiplies it, so a white body takes the per-car
+  tint while dark tyres and glass stay dark.
+- **glow uv** — every vertex is pinned to one texel of a 3-pixel strip (unlit / white /
+  red) used as the `emissiveMap`, so raising `emissiveIntensity` lights only the
+  headlights and the lamp heads. `nightK(t)` drives it, the same way `litAt` drives the
+  building windows.
 
 ### How git is actually used
 
@@ -125,9 +163,11 @@ Note the cold open: on launch every file is new to the client, so the whole city
 under scaffolding and settles after ~5s. A screenshot taken before then shows cranes
 everywhere and is not a bug.
 
-## Open issue
+## Fixed: the flat white roofs
 
-Three flat white quads render in one district. Isolated to `b.roof` by repainting
-materials; exposure/sun intensity, `makeScale(0,0,0)`, house-pyramid geometry and
-coplanar z-fighting have all been ruled out. Next suspect is the shared `GEO_BOX` roof
-slab on 3–4 floor buildings in that district.
+House roofs picked their tile material with `tileRoofMats[(seed >> 3) % len]`. `hash()`
+returns an *unsigned* 32-bit value, so any seed above 2^31 went negative under the signed
+`>>`, the modulo stayed negative, the lookup returned `undefined`, and `new THREE.Mesh(geo,
+undefined)` silently falls back to three's default white `MeshBasicMaterial` — unlit, hence
+flat white. Fixed by using `>>>`. Any future `hash()`-derived index must use `>>>` or
+`Math.abs`; a negative index here fails silently instead of throwing.
