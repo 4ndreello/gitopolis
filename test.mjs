@@ -1,7 +1,7 @@
 // smallest thing that fails if the derivation breaks.
 // run: node test.mjs
 import assert from "node:assert/strict";
-import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt } from "./src/city.js";
+import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK } from "./src/city.js";
 
 // --- dirKey drops the basename before truncating ---
 assert.equal(dirKey("src/main.tsx"), "src", "a file directly in src belongs to src, not to its own district");
@@ -133,6 +133,32 @@ assert.ok(weatherAt(42).rain >= 0 && weatherAt(42).rain <= 1);
     }
   }
   assert.ok(wet > 0 && wet < 120, `rain is occasional, not constant (got ${wet}/200)`);
+}
+
+// --- roads are the gaps between district cells ---
+{
+  const layout = planCity(mk(REPO));
+  const lines = roadLines(layout);
+  assert.equal(lines.length, (layout.dcols - 1) + (layout.drows - 1), "one road per gap, none around the outside");
+  for (const l of lines) {
+    assert.ok(Math.abs(l.at) <= Math.max(layout.gw, layout.gh) / 2, "a road centreline lands inside the city");
+    assert.ok(l.span > 0);
+  }
+  assert.equal(intersections(layout).length,
+    lines.filter(l => l.axis === "x").length * lines.filter(l => l.axis === "z").length);
+
+  // a repo small enough to be one district has no gaps, so no roads and no cars
+  assert.deepEqual(roadLines(planCity(mk(["a.txt", "b.txt"]))), []);
+  assert.deepEqual(intersections(planCity(mk(["a.txt", "b.txt"]))), []);
+}
+
+// --- headlights are off at noon and full at midnight ---
+assert.equal(nightK(0.5), 0, "noon is not night");
+assert.equal(nightK(0), 1, "midnight is fully night");
+assert.ok(nightK(18 / 24) > 0 && nightK(18 / 24) < 1, "dusk is a ramp, not a switch");
+for (let i = 0; i <= 96; i++) {
+  const k = nightK(i / 96);
+  assert.ok(k >= 0 && k <= 1, `nightK stays in [0,1] at ${(i / 96 * 24).toFixed(1)}h`);
 }
 
 console.log("ok — all city derivation checks passed");

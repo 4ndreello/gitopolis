@@ -89,9 +89,16 @@ export function planCity(files) {
     const size = sizeOf.get(d);
     // centre a small district inside its cell so streets stay aligned
     const pad = (block - size) / 2;
-    const bx = (cell % dcols) * stride + pad;
-    const by = Math.floor(cell / dcols) * stride + pad;
-    blocks.push({ bx, by, size, dir: d, park: false });
+    const cx = (cell % dcols) * stride;
+    const cy = Math.floor(cell / dcols) * stride;
+    const bx = cx + pad;
+    const by = cy + pad;
+    // the block covers the whole cell even when the district is smaller than
+    // it: paving only the district left a small block as an island in the
+    // middle of the asphalt, which reads as a city built on top of the road.
+    // `inner` is the padded rectangle the buildings actually occupy — the
+    // renderer paves that and lays the rest of the cell to lawn.
+    blocks.push({ bx: cx, by: cy, size: block, inner: { bx, by, size }, dir: d, park: false });
     const slots = size * size;
     const taken = new Set();
     // sorted so probe order does not depend on scan order
@@ -105,6 +112,15 @@ export function planCity(files) {
     }
     for (let j = 0; j < slots; j++) {
       if (!taken.has(j)) empty.push({ gx: bx + (j % size), gy: by + Math.floor(j / size), park: false });
+    }
+    // the strip of cell the district does not fill is lawn, so offer it as
+    // ground for trees. pad can be a half unit, hence the interval test rather
+    // than an index lookup.
+    const within = (g, lo, n) => g >= lo - 0.5 && g < lo + n - 0.5;
+    for (let j = 0; j < block * block; j++) {
+      const gx = cx + (j % block), gy = cy + Math.floor(j / block);
+      if (within(gx, bx, size) && within(gy, by, size)) continue;
+      empty.push({ gx, gy, park: false });
     }
   }
 
@@ -127,6 +143,35 @@ export function planCity(files) {
     districts: nd,
     pos, empty, blocks,
   };
+}
+
+// ---- streets ----
+// the gaps between district cells are the roads. one derivation, consumed by
+// the traffic lanes, the painted strips, the crosswalks and the lamp posts —
+// when they each computed it themselves they drifted apart by a curb width.
+// `at` is the fixed coordinate of the road centreline; `span` is its length.
+export function roadLines(layout) {
+  const stride = layout.block + GUT;
+  const lines = [];
+  for (let r = 1; r < layout.drows; r++) {
+    lines.push({ axis: "x", at: r * stride - GUT / 2 - layout.gh / 2, span: layout.gw + 3 });
+  }
+  for (let c = 1; c < layout.dcols; c++) {
+    lines.push({ axis: "z", at: c * stride - GUT / 2 - layout.gw / 2, span: layout.gh + 3 });
+  }
+  return lines;
+}
+
+export function intersections(layout) {
+  const lines = roadLines(layout);
+  const out = [];
+  for (const a of lines) {
+    if (a.axis !== "x") continue;
+    for (const b of lines) {
+      if (b.axis === "z") out.push({ x: b.at, z: a.at });
+    }
+  }
+  return out;
 }
 
 // ---- clock ----
@@ -159,6 +204,14 @@ export function litAt(path, t) {
   const hour = t * 24;
   const lit = off > 24 ? hour >= on || hour < off - 24 : hour >= on && hour < off;
   return lit ? 1 : 0;
+}
+
+// headlights, lamp posts and their light pools all ramp on this. eased over two
+// hours at each end so nothing snaps on: dark before 05:00, lit after 19:00.
+export function nightK(t) {
+  const hour = t * 24;
+  const ramp = (a, b) => Math.min(1, Math.max(0, (hour - a) / (b - a)));
+  return hour < 12 ? 1 - ramp(5, 7) : ramp(17, 19);
 }
 
 // two rush peaks over a daytime plateau, with a dead trough around 3am.
