@@ -147,3 +147,30 @@ export function clockLabel(t) {
   const h = String(Math.floor(mins / 60)).padStart(2, "0");
   return `${h}:${String(mins % 60).padStart(2, "0")}`;
 }
+
+// ---- ambient rhythms ----
+// every building keeps its own schedule, so the city lights up window by
+// window instead of the whole skyline flipping on at once.
+export function litAt(path, t) {
+  const h = hash(path);
+  if (rand01(h) < 0.15) return 0;         // some places are simply empty
+  const on = 17 + rand01(h + 1) * 3;      // 17:00 .. 20:00
+  const off = 21 + rand01(h + 2) * 6;     // 21:00 .. 03:00, wrapping past midnight
+  const hour = t * 24;
+  const lit = off > 24 ? hour >= on || hour < off - 24 : hour >= on && hour < off;
+  return lit ? 1 : 0;
+}
+
+// two rush peaks over a daytime plateau, with a dead trough around 3am.
+export function trafficAt(t) {
+  const hour = t * 24;
+  const peak = (centre, width) => Math.exp(-(((hour - centre) / width) ** 2));
+  return Math.min(1, 0.05 + 0.35 * peak(13, 5) + 0.6 * peak(8, 1.6) + 0.6 * peak(18, 1.8));
+}
+
+// weather is seeded by the in-game day, not sampled and stored, so it stays a
+// pure projection: the same day always has the same sky.
+export function weatherAt(day) {
+  const overcast = rand01(day * 1.7);
+  return { overcast, rain: overcast > 0.72 ? (overcast - 0.72) / 0.28 : 0 };
+}

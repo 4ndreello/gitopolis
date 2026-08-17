@@ -1,7 +1,7 @@
 // smallest thing that fails if the derivation breaks.
 // run: node test.mjs
 import assert from "node:assert/strict";
-import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel } from "./src/city.js";
+import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt } from "./src/city.js";
 
 // --- dirKey drops the basename before truncating ---
 assert.equal(dirKey("src/main.tsx"), "src", "a file directly in src belongs to src, not to its own district");
@@ -97,5 +97,42 @@ assert.equal(clockLabel(0.25), "06:00");
 assert.equal(clockLabel(0.5), "12:00");
 assert.equal(clockLabel(0.9999), "23:59");
 assert.notEqual(clockLabel(1), "24:00", "the label never reads 24:00");
+
+// --- buildings light up on their own schedules, never all at once ---
+{
+  const paths = Array.from({ length: 200 }, (_, i) => `src/f${i}.js`);
+  const litAt23 = paths.filter(p => litAt(p, 23 / 24) === 1);
+  assert.ok(litAt23.length > 0, "some buildings are lit at 23:00");
+  assert.ok(litAt23.length < paths.length, "and some are not — the skyline is uneven");
+  for (const p of paths) {
+    assert.equal(litAt(p, 12 / 24), 0, `${p} must be dark at noon`);
+    assert.equal(litAt(p, 8 / 24), 0, `${p} must be dark at 08:00`);
+  }
+}
+
+// --- traffic has a 3am trough and two rush peaks ---
+assert.ok(trafficAt(3 / 24) < trafficAt(8 / 24), "3am is deader than the morning rush");
+assert.ok(trafficAt(3 / 24) < trafficAt(18 / 24), "3am is deader than the evening rush");
+assert.ok(trafficAt(13 / 24) < trafficAt(8 / 24), "midday is calmer than rush hour");
+for (const h of [0, 3, 8, 13, 18, 23]) {
+  const d = trafficAt(h / 24);
+  assert.ok(d >= 0 && d <= 1, `trafficAt stays in [0,1] at ${h}h`);
+}
+
+// --- weather is a projection of the day, not a stored roll ---
+assert.deepEqual(weatherAt(42), weatherAt(42), "the same in-game day always has the same weather");
+assert.ok(weatherAt(42).overcast >= 0 && weatherAt(42).overcast <= 1);
+assert.ok(weatherAt(42).rain >= 0 && weatherAt(42).rain <= 1);
+{
+  let wet = 0;
+  for (let d = 0; d < 200; d++) {
+    const w = weatherAt(d);
+    if (w.rain > 0) {
+      wet++;
+      assert.ok(w.overcast > 0.7, `day ${d} rains without being overcast`);
+    }
+  }
+  assert.ok(wet > 0 && wet < 120, `rain is occasional, not constant (got ${wet}/200)`);
+}
 
 console.log("ok — all city derivation checks passed");
