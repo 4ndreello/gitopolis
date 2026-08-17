@@ -209,6 +209,6 @@ const server = createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log(`repo-city: ${REPOS.length} repo(s) under ${ROOT}`);
+  console.log(`gitopolis: ${REPOS.length} repo(s) under ${ROOT}`);
   console.log(`open http://localhost:${PORT}`);
 });
