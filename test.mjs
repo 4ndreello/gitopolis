@@ -2,7 +2,7 @@
 // run: node test.mjs
 import assert from "node:assert/strict";
 import { cheat, mergeWeather, mountCheat } from "./src/cheat.js";
-import { fitDistance, fillFor, frameFraction, dirKey, floorsOf, planCity, blockStep, BLOCK_STEPS, BELT, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus, fmtBytes } from "./src/city.js";
+import { fitDistance, fillFor, frameFraction, dirKey, floorsOf, planCity, blockStep, BLOCK_STEPS, rectStep, RECT_STEPS, BELT, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus, fmtBytes } from "./src/city.js";
 
 // --- fmtBytes stays three characters wide across the unit boundaries ---
 assert.equal(fmtBytes(0), "0");
@@ -178,6 +178,43 @@ const BRAVO = [
   for (const f of B) {
     assert.deepEqual(before.pos.get(f.key), after.pos.get(f.key), `${f.key} moved when another repo grew`);
   }
+}
+
+// --- cross-repo stability, the harder half: growing repo A by a whole DISTRICT ---
+// the test above grows a district's file count, which moves the pitch. this one
+// grows the district *count*, which moves the rectangle — a different mechanism
+// that the first test cannot reach, and the one that actually shipped broken:
+// with per-repo rectangle widths, alpha going from 9 directories to 10 crossed
+// ceil(sqrt(9)) -> ceil(sqrt(10)) and slid bravo one whole cell sideways.
+{
+  const dirs = (n) => Array.from({ length: n }, (_, i) => `d${i}/f.js`);
+  const B = mkr("bravo", BRAVO);
+  const before = planCity([...mkr("alpha", dirs(9)), ...B]);
+  const after = planCity([...mkr("alpha", dirs(10)), ...B]);
+  assert.equal(after.dcols, before.dcols, "a new top-level directory must not widen the grid");
+  assert.equal(after.drows, before.drows);
+  assert.deepEqual(after.repos, before.repos, "nor move any neighbourhood");
+  for (const f of B) {
+    assert.deepEqual(before.pos.get(f.key), after.pos.get(f.key),
+      `${f.key} moved because another repo gained a directory`);
+  }
+}
+
+// --- rectStep is coarse on purpose, and coarse enough to stop that slide ---
+{
+  assert.equal(rectStep(3), rectStep(4), "nine districts and ten must share a rectangle");
+  assert.equal(rectStep(5), rectStep(8));
+  let last = 0;
+  for (let n = 0; n <= 200; n++) {
+    const s = rectStep(n);
+    assert.ok(s >= Math.max(1, n), `rectStep(${n}) = ${s} cannot hold ${n} districts`);
+    assert.ok(s >= last, `rectStep is not monotone at ${n}`);
+    assert.equal(rectStep(s), s, `rectStep(${s}) is not idempotent — the grid would drift on replan`);
+    last = s;
+  }
+  // it must be strictly coarser than the pitch table, or it cannot stabilise
+  // what the pitch table already fails to: 3 and 4 are both in BLOCK_STEPS.
+  assert.notEqual(blockStep(3), blockStep(4));
 }
 
 // --- a repo with no name is still a city: the single-repo call is unchanged ---

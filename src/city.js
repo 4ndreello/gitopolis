@@ -59,6 +59,19 @@ export function blockStep(n) {
   return Math.ceil(n / 16) * 16;
 }
 
+// the same trick for a repo's rectangle, on a far coarser table. BLOCK_STEPS is
+// fine at the low end on purpose — pitch slack is lawn inside every block, and
+// paying it on all of them adds up — but it is *too* fine to stabilise a
+// rectangle: 3 and 4 are both in it, so nine districts becoming ten still
+// widens the grid. rectangle slack is whole unclaimed cells, which already
+// become parks, so it can afford to be bought in doublings.
+export const RECT_STEPS = [1, 2, 4, 8, 16, 32];
+
+export function rectStep(n) {
+  for (const s of RECT_STEPS) if (s >= n) return s;
+  return Math.ceil(n / 32) * 32;
+}
+
 // plots and districts are hashed, never index-assigned, so a file keeps its
 // address when siblings appear or vanish.
 export function planCity(files) {
@@ -95,35 +108,41 @@ export function planCity(files) {
   const block = blockStep(maxSize);
   const stride = block + GUT;
 
-  // each repo owns a rectangle of cells; the meta-grid lays those rectangles
-  // out with a belt between them. sorted, not selection-ordered, so the same
-  // four repos always produce the same city.
+  // every repo owns the *same* rectangle of cells, sized to the largest, and
+  // the meta-grid tiles those rectangles with a belt between them. sorted, not
+  // selection-ordered, so the same four repos always produce the same city.
+  //
+  // sizing each repo to its own contents instead was the obvious version and it
+  // reintroduced the bug blockStep exists to kill, one level up: rectangle
+  // widths were continuous and the origins were their running sum, so a repo
+  // gaining a top-level directory slid every neighbour sideways. A repo you are
+  // not looking at must not move because you ran `mkdir src/thing` in another.
+  //
+  // uniform alone is not enough — when the repo that grows *is* the largest,
+  // the shared rectangle grows and everything moves anyway — so the dimensions
+  // are quantized too, on a much coarser table than the pitch. coarse is
+  // affordable here in a way it is not for `block`: rectangle slack is whole
+  // cells nobody claims, and those already become parks.
   const names = [...ndOf.keys()].sort();
   const mcols = Math.max(1, Math.ceil(Math.sqrt(names.length)));
   const mrows = Math.max(1, Math.ceil(names.length / mcols));
-  const rects = names.map((name, i) => {
-    const n = ndOf.get(name);
-    const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
-    return { name, cols, rows: Math.max(1, Math.ceil(n / cols)), mc: i % mcols, mr: Math.floor(i / mcols) };
-  });
-  // a meta-column is as wide as its widest repo, a meta-row as tall as its
-  // tallest. the 1s are the empty-repo-list case, where the grid is one cell.
-  const colW = new Array(mcols).fill(1), rowH = new Array(mrows).fill(1);
-  for (const r of rects) {
-    colW[r.mc] = Math.max(colW[r.mc], r.cols);
-    rowH[r.mr] = Math.max(rowH[r.mr], r.rows);
-  }
-  const scan = (a) => { let s = 0; return a.map(v => { const at = s; s += v + BELT; return at; }); };
-  const colX = scan(colW), rowY = scan(rowH);
-  const dcols = colW.reduce((a, b) => a + b, 0) + BELT * (mcols - 1);
-  const drows = rowH.reduce((a, b) => a + b, 0) + BELT * (mrows - 1);
+  let rcols = 1;
+  for (const n of ndOf.values()) rcols = Math.max(rcols, Math.ceil(Math.sqrt(n)));
+  rcols = rectStep(rcols);
+  let rrows = 1;
+  for (const n of ndOf.values()) rrows = Math.max(rrows, Math.ceil(n / rcols));
+  rrows = rectStep(rrows);
+
+  const dcols = mcols * rcols + BELT * (mcols - 1);
+  const drows = mrows * rrows + BELT * (mrows - 1);
   const cells = dcols * drows;
 
-  // ponytail: a repo gaining a *district* can widen its meta-column and shift
-  // every neighbour sideways — blockStep only quantizes the pitch, not the
-  // rectangle. quantize rcols/rrows the same way if a real four-repo city is
-  // seen to slide when a new directory appears.
-  const repos = rects.map(r => ({ name: r.name, cx: colX[r.mc], cy: rowY[r.mr], cols: r.cols, rows: r.rows }));
+  const repos = names.map((name, i) => ({
+    name,
+    cx: (i % mcols) * (rcols + BELT),
+    cy: Math.floor(i / mcols) * (rrows + BELT),
+    cols: rcols, rows: rrows,
+  }));
   const repoAt = new Map(repos.map(r => [r.name, r]));
   const cellOf = (r, i) => (r.cy + Math.floor(i / r.cols)) * dcols + r.cx + (i % r.cols);
 
