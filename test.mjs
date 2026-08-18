@@ -1,7 +1,15 @@
 // smallest thing that fails if the derivation breaks.
 // run: node test.mjs
 import assert from "node:assert/strict";
-import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus } from "./src/city.js";
+import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus, fmtBytes } from "./src/city.js";
+
+// --- fmtBytes stays three characters wide across the unit boundaries ---
+assert.equal(fmtBytes(0), "0");
+assert.equal(fmtBytes(999), "999");
+assert.equal(fmtBytes(1023), "1023", "still bytes right up to the boundary");
+assert.equal(fmtBytes(1024), "1.0k");
+assert.equal(fmtBytes(4300), "4.2k");
+assert.equal(fmtBytes(2_000_000), "1.9M");
 
 // --- dirKey drops the basename before truncating ---
 assert.equal(dirKey("src/main.tsx"), "src", "a file directly in src belongs to src, not to its own district");

@@ -2,7 +2,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import {
   GUT, FLOOR_H, MAX_FLOORS,
-  hash, rand01, dirKey, extOf, floorsOf, isHouse, planCity,
+  hash, rand01, dirKey, extOf, floorsOf, isHouse, planCity, fmtBytes,
   dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt,
   roadLines, intersections, nightK, focus,
 } from "./city.js";
@@ -26,6 +26,9 @@ function ingest(snapshot) {
   const seen = new Set();
   const done = [];   // cranes coming down this snapshot: one confetti burst each
   const gone = [];   // files deleted this snapshot: one smoke column each
+  const born = [];   // the three below feed the debug panel and nothing else
+  const grew = [];
+  const died = [];
   for (const inc of snapshot.files) {
     seen.add(inc.path);
     const cur = files.get(inc.path);
@@ -35,11 +38,13 @@ function ingest(snapshot) {
         path: inc.path, bytes: Math.max(96, inc.bytes), target: inc.bytes,
         dirty: inc.dirty, grown: 0, dying: 0, flash: 0, attn: 1,
       });
+      born.push(inc.path);
       layoutDirty = true;
       continue;
     }
     if (cur.dying) { cur.dying = 0; cur.grown = Math.max(0.05, cur.grown); cur.attn = 1; }
     if (Math.abs(cur.target - inc.bytes) > 0) {
+      grew.push({ path: inc.path, from: cur.target, to: inc.bytes });
       if (floorsOf(cur.target) !== floorsOf(inc.bytes)) cur.flash = 1;
       cur.target = inc.bytes;
       cur.attn = 1;
@@ -60,6 +65,7 @@ function ingest(snapshot) {
       const w = fileWorld(f);
       ghosts.push({ x: w.x, z: w.z, w: 1 });
       gone.push(w);
+      died.push(path);
     }
   }
   // one particle budget split across the whole commit: 40 files each asking for
@@ -81,6 +87,7 @@ function ingest(snapshot) {
   }
   if (snapshot.repo && el.repo.value !== snapshot.repo) el.repo.value = snapshot.repo;
   el.branch.textContent = snapshot.branch || "?";
+  logSnapshot(snapshot, born, grew, died, done.length);
 }
 
 // ============================================================
@@ -1257,7 +1264,69 @@ const el = {
   boot: document.getElementById("boot"),
   bootTxt: document.getElementById("boot-txt"),
   bootBar: document.querySelector("#boot-bar > i"),
+  perf: document.getElementById("r-perf"),
+  dbg: document.getElementById("dbg"),
 };
+// F3 is "find again" in firefox, so the default has to go
+addEventListener("keydown", (e) => {
+  if (e.key !== "F3") return;
+  e.preventDefault();
+  el.dbg.hidden = !el.dbg.hidden;
+});
+// ---- debug panel ----
+// a switch sends this client two frames for the same event (its own /events
+// scan plus the broadcast setActive schedules), so "only log a real change"
+// is what keeps the feed from double-printing.
+let scanMs = 0, watching = true;
+const dbgLog = [];
+
+function logSnapshot(snap, born, grew, died, cranes) {
+  scanMs = snap.ms ?? scanMs;
+  watching = snap.watching !== false;
+  if (!born.length && !grew.length && !died.length && !cranes) return;
+  // one file touched is the common case and the only one worth a name; past
+  // that the counts read faster than a truncated list of paths.
+  const only = born.length + grew.length + died.length === 1;
+  let what;
+  if (only && grew.length) {
+    const g = grew[0];
+    what = `~ ${g.path}  ${fmtBytes(g.from)} -> ${fmtBytes(g.to)}`;
+  } else if (only && born.length) {
+    what = `+ ${born[0]}`;
+  } else if (only) {
+    what = `- ${died[0]}`;
+  } else {
+    what = `+${born.length} ~${grew.length} -${died.length}`;
+  }
+  if (cranes) what += ` · ${cranes} crane${cranes > 1 ? "s" : ""} down`;
+  dbgLog.unshift(`${new Date().toTimeString().slice(0, 8)}  ${what}  ${scanMs}ms`);
+  if (dbgLog.length > 8) dbgLog.pop();
+}
+
+// the row list is the curation: __city() is the machine hook and may grow
+// fields freely, the panel shows only what a human reads at a glance.
+function dbgText() {
+  const c = window.__city();
+  const rows = [
+    ["fps", c.fps],
+    ["draws", c.dc],
+    ["tris", `${Math.round(c.tris / 1000)}k`],
+    ["geo/tex", `${c.geo} / ${c.tex}`],
+    ["heap", c.heap ? `${c.heap} MB` : "n/a"],
+    ["files", `${c.files}  ${c.dirty} dirty  ${c.cranes} crane`],
+    ["rising", c.growing],
+    ["dust", `${c.dust}  (${c.smoke} smoke)`],
+    ["clock", clockLabel(frozenT ?? dayT(Date.now()))],
+    ["overcast", c.overcast.toFixed(2)],
+    ["raining", c.raining ? "YES" : "no"],
+    ["watch", watching ? "on" : "OFF - poll only"],
+    ["scan", `${scanMs}ms`],
+  ];
+  return rows.map(([k, v]) => `${k.padEnd(9)}${v}`).join("\n")
+    + `\n${"-".repeat(30)}\n`
+    + (dbgLog.join("\n") || "(nada ainda)");
+}
+
 function setStatus(text, state) {
   el.status.textContent = text;
   el.status.dataset.ok = state;
@@ -1304,11 +1373,18 @@ fetch("/repos")
       o.value = o.textContent = name;
       el.repo.append(o);
     }
-    connect(names[0]);
+    // the repo lives in the hash so F5 comes back to the one you were looking at
+    const want = decodeURIComponent(location.hash.slice(1));
+    const start = names.includes(want) ? want : names[0];
+    el.repo.value = start;
+    connect(start);
   })
   .catch(() => connect(null));
 
-el.repo.addEventListener("change", () => connect(el.repo.value));
+el.repo.addEventListener("change", () => {
+  location.hash = encodeURIComponent(el.repo.value);
+  connect(el.repo.value);
+});
 
 // ============================================================
 // loop
@@ -1465,10 +1541,22 @@ function tick(ts) {
   if (fpsAcc > 0.5) {
     fps = Math.round(fpsN / fpsAcc);
     el.clock.textContent = clockLabel(t);
+    const mb = heapMB();
+    el.perf.textContent = mb ? `${fps}fps · ${mb}MB` : `${fps}fps`;
+    // never `if (hidden) return` here: requestAnimationFrame(tick) is below
+    // this block, so an early return freezes the city on the first close.
+    if (!el.dbg.hidden) el.dbg.textContent = dbgText();
     fpsAcc = 0; fpsN = 0;
   }
 
   requestAnimationFrame(tick);
+}
+
+// chromium-only, and coarse: bucketed to 100kb and cached for ~20min unless
+// chrome runs with --enable-precise-memory-info. geo/tex below are the exact
+// numbers, and the ones that actually climb when disposeBuilding leaks.
+function heapMB() {
+  return performance.memory ? Math.round(performance.memory.usedJSHeapSize / 1048576) : 0;
 }
 
 // local-only inspection hook; the smoke tests read this
@@ -1492,9 +1580,20 @@ window.__city = () => ({
   night: +nightK(frozenT ?? dayT(Date.now())).toFixed(2),
   peds: peds ? peds.count : 0,
   fps,
+  dc: renderer.info.render.calls,
+  tris: renderer.info.render.triangles,
+  geo: renderer.info.memory.geometries,
+  tex: renderer.info.memory.textures,
+  heap: heapMB(),
+  overcast: weatherAt(dayIndex(Date.now())).overcast,
+  raining: rainPoints.visible,
+  watching,
+  ms: scanMs,
 });
 // freeze the clock at a fixed hour for screenshots; pass null to resume
 window.__time = (t) => { frozenT = t; };
+// same family as __city: lets a headless check read the panel without a screenshot
+window.__dbg = dbgText;
 window.__toggle = (what) => {
   if (what === "dust") dustPoints.visible = !dustPoints.visible;
   if (what === "cars") for (const t of traffic) t.mesh.visible = !t.mesh.visible;

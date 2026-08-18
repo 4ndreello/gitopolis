@@ -1,22 +1,23 @@
 # Debug HUD (F3)
 
+Revisado depois de dois passes de review. As decisões que mudaram estão marcadas
+**[rev]** com o motivo — elas são o conteúdo mais útil deste documento.
+
 ## Objetivo
 
-Ver, sem abrir o devtools, duas coisas que hoje só existem em `window.__city()` e no
-console: **como o renderer está indo** (fps, memória, draw calls) e **o que o servidor
-acabou de analisar** (quais arquivos mudaram, quanto o `git` demorou, o que disparou o
-scan).
+Ver, sem abrir o devtools, duas coisas que hoje só existem em `window.__city()`:
+**como o renderer está indo** e **o que o servidor acabou de analisar**.
 
 Duas superfícies:
 
 - **linha compacta, sempre visível** — encostada no `#hud` que já existe.
-- **painel F3** — tudo o resto, escondido por padrão.
+- **painel F3** — todo o resto, escondido por padrão.
 
 Nada é desenhado na cena. Zero linha nova de three.js.
 
 ## A. Linha compacta
 
-`index.html` ganha dois spans no `#hud`:
+Dois spans no `#hud` do `index.html`:
 
 ```html
 <span class="sep">·</span>
@@ -24,188 +25,254 @@ Nada é desenhado na cena. Zero linha nova de three.js.
 <span id="r-mem"></span>
 ```
 
-Preenchidos no bloco de 0,5 s que já atualiza o relógio (`main.js`, dentro de `tick`,
-onde hoje só roda `el.clock.textContent = clockLabel(t)`). Nenhum timer novo.
-
-- fps: a variável `fps` que já existe.
-- memória: `performance.memory.usedJSHeapSize`. É **não-padrão e só Chromium**. Se
-  `performance.memory` não existir, `#r-mem` fica com `textContent = ""` e some. Não se
-  inventa número e não se estima.
+Preenchidos no bloco de 0,5 s que já existe dentro de `tick` (onde hoje só roda
+`el.clock.textContent = clockLabel(t)`). Nenhum timer novo.
 
 ## B. Painel F3
 
-`index.html` ganha `<pre id="dbg" hidden>` posicionado `top:8px; right:10px`,
-`pointer-events:none`, mesma fonte mono do HUD.
+```html
+<pre id="dbg" hidden></pre>
+```
 
-Toggle: `window.addEventListener("keydown", e => { if (e.key === "F3") { e.preventDefault(); ... } })`.
-O `preventDefault` é obrigatório: F3 é "find again" no Firefox.
+```css
+#dbg {
+  position: fixed; top: 8px; right: 10px; z-index: 6;
+  margin: 0; font: inherit; pointer-events: none;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+#dbg[hidden] { display: none; }
+```
 
-O painel só é preenchido quando visível (`if (el.dbg.hidden) return;` antes de montar a
-string), no mesmo bloco de 0,5 s. Fechado custa zero.
+Três detalhes de CSS que **[rev]** são obrigatórios, não estilo:
+
+- `z-index: 6` — `#boot` é `position:fixed; inset:0; z-index:5` e só sai de cena via
+  `opacity`. Sem isso o painel fica atrás da cortina exatamente durante o cold open,
+  que é o único momento em que a entrada `+51` do feed interessa.
+- `margin: 0; font: inherit` — a UA stylesheet de `<pre>` reseta `font-family` para
+  `monospace` e `font-size` para `medium`, e injeta `margin: 1em 0`. "Mesma fonte do
+  HUD" não sai de graça.
+- `#dbg[hidden] { display: none }` explícito — qualquer regra de autor com `display`
+  vence o `[hidden]` da UA por origem, e o atributo vira no-op.
+
+### Toggle
+
+```js
+addEventListener("keydown", (e) => {
+  if (e.key !== "F3") return;
+  e.preventDefault();            // F3 é "find again" no Firefox
+  el.dbg.hidden = !el.dbg.hidden;
+});
+```
+
+### Preenchimento
+
+Dentro do bloco de 0,5 s que já existe:
+
+```js
+if (!el.dbg.hidden) el.dbg.textContent = dbgText();
+```
+
+**[rev] Nunca `if (el.dbg.hidden) return;`.** O `requestAnimationFrame(tick)` fica
+*depois* desse bloco; um `return` ali sai de `tick` inteiro e congela a cidade no
+primeiro fechamento do painel — além de pular o relógio e o reset de `fpsAcc/fpsN`.
+
+Fechado, o painel custa uma comparação de booleano a cada meio segundo.
 
 ### Conteúdo
 
+Uma chave por linha, geradas por `Object.entries(stats())`. **A ordem dos campos no
+literal de `stats()` é o layout do painel** — não existe código de curadoria, e o
+painel nunca diverge de `window.__city()`.
+
 ```
-render  58fps   31 dc   812k tris   9 progs
-heap    142 / 2048 MB
-city    51 files  3 dirty  1 crane  0 rising
-fx      204 dust  12 smoke  4 flash
-world   06:12  ·  overcast .81  ·  night .00
-rain    YES  .34  ·  412 drops
-cam     d 34.2 -> home 41.0  ·  attn 3
-──── ingest ────────────────────────────────
-18:40:02  watch  38ms   +2 ~1 -0
-  ~ src/main.js      4.1k -> 4.3k
-  + src/hud.js       -> 1.2k
-18:39:44  poll   41ms   commit: 3 cranes down
-18:39:12  watch  12ms   ~1
-  ~ README.md        2.0k -> 2.1k
+fps        58
+dc         31
+tris       812k
+geo        412
+tex        18
+heap       142 MB
+files      51
+dirty      3
+cranes     1
+rising     0
+parts      204
+smoke      12
+clock      06:12
+overcast   .81
+raining    YES
+watch      on
+scan       38ms
+──── ingest ─────────────────────────
+18:40:02   ~ src/main.js  4.1k → 4.3k
+18:39:44   +2 ~1 -0 · 3 cranes down
+18:39:12   ~ README.md    2.0k → 2.1k
 ```
 
-Fontes, todas já existentes:
+### Campos que mudaram no review
 
-| campo | fonte |
-|---|---|
-| fps | `fps` (já calculado em `tick`) |
-| dc / tris / progs | `renderer.info.render.calls`, `.triangles`, `renderer.info.programs.length` |
-| heap | `performance.memory.usedJSHeapSize` / `.jsHeapSizeLimit` |
-| files / dirty / rising / cranes | `files` Map + `buildings` Map (já em `__city()`) |
-| dust / smoke / flash | `dust.length`, `dust.filter(p => p.k).length`, `flashPool.filter(s => s.life > 0).length` |
-| world / overcast / night | `clockLabel(t)`, `weatherAt(dayIndex(Date.now()))`, `nightK(t)` |
-| rain | ver abaixo |
-| cam | `camera.position.distanceTo(controls.target)`, `homeDist`, `attn` |
+**[rev] `geo` / `tex` (`renderer.info.memory`) entram, e são o campo mais importante
+do painel.** `performance.memory.usedJSHeapSize` é bucketizado em 100 KB e **cacheado
+por ~20 min** sem `--enable-precise-memory-info` — ou seja, um número parado, inútil
+pro caso de uso que pediu ele ("ver a RAM subindo"). `heap` fica porque foi pedido e é
+grátis, mas o detector de vazamento real neste app é a contagem de geometrias e
+texturas: se `disposeBuilding` deixar de dispor, elas sobem monotonicamente e nunca
+descem. Preciso, exato, e já contado pelo three.
 
-### Rain
+`heap` some da tela quando `performance.memory` não existe (não-Chromium). Não se
+inventa nem se estima número.
 
-`weatherAt` (`city.js:232`) devolve `rain: overcast > 0.72 ? (overcast-0.72)/0.28 : 0`,
-ou seja **exatamente zero** quando não chove — o booleano não precisa de threshold
-inventado.
+**[rev] `parts` / `smoke` deixam claro que são total e subconjunto.** `smoke` é
+`dust.filter(p => p.k)` — mostrar `204 dust · 12 smoke` lado a lado como categorias
+irmãs dava a entender 216 partículas.
 
-A linha mostra três fatos de fontes diferentes de propósito:
+**[rev] `drops` cortado.** Ia imprimir `Infinity` até a primeira chuva
+(`drawRange = {start:0, count:Infinity}` é o default do three) e depois ficar preso no
+último valor não-zero, porque `updateRain` faz `if (!n) return;` *antes* do
+`setDrawRange`. Pior: o "detector de divergência" que justificava o campo é impossível
+por construção — `rainPoints.visible = n > 0` deriva do mesmo `weather.rain`, no mesmo
+frame. Detectava um bug que não pode acontecer, e reportava um que não existe.
 
-- `YES`/`no` — `rainPoints.visible`, a verdade do que está na tela.
-- `.34` — `weatherAt(...).rain`, a derivação.
-- `412 drops` — `rainGeo.drawRange.count`.
+**[rev] `night`, `progs`, `camDist`, `homeDist`, `attn` ficam fora do painel** —
+redundantes com o relógio, constantes depois do warmup, ou só interessantes pra quem
+está tunando `driveCamera`. Continuam em `window.__city()`, que os smoke tests usam.
 
-Se `YES` aparecer com `0 drops`, derivação e render discordaram. É esse tipo de
-divergência que o painel existe pra pegar.
+### `stats()`
 
-### Não duplicar `__city()`
-
-`window.__city()` e o painel leem os mesmos campos. O corpo de `__city()` vira uma
-função `stats()` em `main.js`; o hook passa a ser `window.__city = stats`. Uma fonte só,
-senão os dois divergem na primeira mudança.
-
-`stats()` ganha os campos que hoje não tem: `dc`, `tris`, `progs`, `heap`, `heapMax`,
-`raining`, `drops`, `overcast`, `flash`.
+O corpo de `window.__city()` vira `const stats = () => ({...})`, e o hook vira
+`window.__city = stats`. Duas linhas, não é refatoração: é o que faz o painel e o hook
+não divergirem. `stats()` ganha `dc`, `tris`, `geo`, `tex`, `heap`, `raining`,
+`overcast`, `clock`, `rising`, `watch`, `scan`.
 
 ## C. Feed de ingest
 
-Ring buffer de 8 entradas, alimentado dentro de `ingest()` — que já percorre o snapshot
-inteiro pra decidir quem nasce, muda, morre e larga o andaime.
+**[rev] Uma linha por snapshot**, não um bloco de até 3 paths com truncamento. O pedido
+era "o que a gente analisou", não um `git log` na tela. Isso mata `entryLines`,
+`LINES_MAX`, o sufixo `... +N more` e o problema do `git checkout` de outra branch
+enchendo o painel com uma entrada só.
 
-`ingest()` passa a coletar, além dos `done`/`gone` que já monta:
-
-- `born` — `inc.path` quando `!cur`
-- `changed` — `{ path, from: cur.target, to: inc.bytes }` quando os bytes mexem
-- `gone` ganha o `path` junto das coordenadas (hoje só guarda `w`)
-- `undirty` — `done.length`; `dirtied` — os que ficaram sujos
-
-Uma entrada por snapshot, empurrada só se algo mudou (um snapshot idêntico já é
-descartado no servidor, mas o cliente também não registra ruído).
-
-Formato da entrada:
+Quando exatamente um arquivo muda — o caso comum — a linha mostra o path e o delta:
 
 ```
-{ at: "18:40:02", why: "watch", ms: 38, add: 2, mod: 1, del: 0,
-  cranes: 3, lines: ["~ src/main.js  4.1k -> 4.3k", "+ src/hud.js  -> 1.2k"] }
+18:40:02   ~ src/main.js  4.1k → 4.3k
 ```
 
-Até 3 `lines` por entrada; o excedente vira `... +12 more`. Sem isso um `git checkout`
-de outra branch enche o painel inteiro com uma entrada só.
+Caso contrário, contadores:
 
-O cold open (primeiro snapshot: 51 arquivos novos) produz `+51` e é correto — é
-literalmente o que foi analisado.
+```
+18:39:44   +2 ~1 -0 · 3 cranes down
+```
 
-## D. `server.mjs`: `ms` e `why`
+Ring buffer de 8: `log.unshift(s); if (log.length > 8) log.pop();`.
 
-Snapshot ganha dois campos: `ms` (duração do `scan()`) e `why` ∈
-`watch | poll | switch | open`.
+Alimentado por uma linha no fim de `ingest()`, que já percorre o snapshot inteiro pra
+decidir quem nasce, muda, morre e larga o andaime. `ingest()` passa a contar `born` e
+`changed` junto dos `done`/`gone` que já monta.
 
-### A armadilha
+Empurra só se algo mudou. **[rev]** Isso deixa de ser higiene e vira necessário: num
+switch de repo o cliente recebe dois frames pro mesmo evento (o `scan()` direto do
+`/events` e o `broadcast` agendado por `setActive`), e o guard é o que impede a entrada
+duplicada.
+
+O cold open produz `+51 ~0 -0` e está correto — é literalmente o que foi analisado.
+
+## D. `server.mjs`
+
+Dois campos novos no snapshot: `ms` e `watching`.
+
+### `ms` e a armadilha do dedup
 
 `broadcast()` deduplica com `body === lastPayload`. Se `ms` entrar nessa string, cada
 poll de 700 ms gera bytes diferentes, o dedup nunca acerta, e o servidor passa a
-transmitir 24 kB por segundo pra sempre — com o feed do painel virando lixo junto.
+transmitir pra sempre — com o feed do painel virando lixo junto.
 
-Correção: **deduplicar sobre os dados, anexar a meta depois**.
+Deduplica sobre os dados, anexa a meta depois:
 
 ```js
-function broadcast(snapshot, meta) {
+function broadcast(snapshot, ms) {
   const body = JSON.stringify(snapshot);
-  if (body === lastPayload) return;   // dedup ignora ms/why de propósito
+  if (body === lastPayload) return;   // ms fica fora do dedup de propósito
   lastPayload = body;
-  const frame = `data: ${JSON.stringify({ ...snapshot, ...meta })}\n\n`;
+  const frame = `data: ${JSON.stringify({ ...snapshot, ms })}\n\n`;
   for (const res of clients) res.write(frame);
 }
 ```
 
-### Quem disparou
+`broadcast` tem um único chamador (dentro de `schedule`), então a assinatura nova não
+quebra nada. `lastPayload = null` no `setActive` continua correto: o dedup segue sendo
+sobre o snapshot puro.
 
-`schedule(delay, why)` guarda o motivo do disparo pendente:
+O `/events` de cliente novo escreve `scan()` direto e **[rev] não pode virar
+`broadcast()`** — o comentário no arquivo explica que setar `lastPayload` ali suprimia
+o broadcast pós-switch pros outros clientes. Ele mede o próprio `ms` e anexa igual.
 
-```js
-let pending = null, pendingWhy = "poll";
-function schedule(delay, why) {
-  // um poll não rouba o crédito de um watch já agendado: o watch é a causa real
-  if (why !== "poll" || !pending) pendingWhy = why;
-  if (pending) clearTimeout(pending);
-  pending = setTimeout(async () => {
-    pending = null;
-    const why = pendingWhy;
-    pendingWhy = "poll";
-    const t0 = performance.now();
-    try {
-      broadcast(await scan(), { ms: Math.round(performance.now() - t0), why });
-    } catch (err) {
-      console.error("scan failed:", err.message);
-    }
-  }, delay);
-}
-```
+### `watching`, em vez de `why`
 
-Chamadores: `watch` no `startWatch`, `poll` no `setInterval`, `switch` no `setActive`.
-O snapshot inicial do `/events` sai com `{ ms, why: "open" }`.
+**[rev] O `why` (`watch|poll|switch|open`) foi cortado: ele mentiria no caso comum.**
+
+- `setActive` agenda `schedule(0, "switch")` e logo em seguida `startWatch()` reabre o
+  watcher no repo novo; qualquer evento de fs nos ms seguintes vira `schedule(140,
+  "watch")`, que sobrescreve o motivo **e** empurra o disparo de 0 pra 140 ms.
+- No sentido oposto, `schedule` faz `clearTimeout` incondicional: o poll de 700 ms mata
+  o timer do watch e agenda o seu, mas uma guarda de prioridade preservaria o rótulo
+  `watch`. Como `.git/` é filtrado do watcher, **só o poll pega commits** — então o
+  frame "3 cranes down" sairia rotulado `watch`. O poll rouba o timer e doa o crédito.
+
+Qualquer versão disso precisa de lógica de prioridade que ainda erra. O sinal que valia
+a pena é outro e é estático: `startWatch()` tem um `catch` que cai pra poll-only com um
+`console.warn` que ninguém lê, e aí a latência ganha um piso de 700 ms sem explicação.
+Então o snapshot carrega `watching: watcher !== null`. Mesmo diagnóstico, zero timing,
+e não fura o dedup porque só muda quando o estado muda de verdade.
 
 `performance.now()` é global no Node desde a v16.
 
-## E. `src/dbg.js`, puro
+## E. `fmtBytes` em `src/city.js`
 
-Arquivo novo, sem three.js e sem DOM — igual `city.js`, e pelo mesmo motivo:
-`test.mjs` roda em node puro.
+**[rev] Sem `src/dbg.js`.** Com o feed em uma linha por snapshot sobra uma função de
+formatação, e `city.js` já hospeda `clockLabel` — precedente exato de formatador puro,
+já importado por `test.mjs`. Um arquivo novo com cinco exports pra um HUD é o
+over-engineering que este repo evita.
 
 ```js
-export const LOG_MAX = 8;
-export const LINES_MAX = 3;
-export function fmtBytes(n)                      // 812, 4.1k, 1.2M
-export function fmtDelta(kind, path, from, to)   // "~ src/main.js  4.1k -> 4.3k"
-export function entryLines(diff)                 // corta em LINES_MAX, sufixa "... +N more"
-export function pushLog(log, entry)              // unshift + corta em LOG_MAX
-export function renderLog(log)                   // -> string do bloco de ingest
+export function fmtBytes(n)   // 0 -> "0", 999 -> "999", 1024 -> "1.0k", 2e6 -> "1.9M"
 ```
-
-Motivo do arquivo separado, não de main.js: `main.js` já tem 1505 linhas, e formatação
-de delta é lógica não-trivial que precisa de assert.
 
 ## F. Teste
 
-`test.mjs` ganha um bloco importando `src/dbg.js`:
+Um bloco em `test.mjs`, no estilo flat de `assert` do arquivo: `fmtBytes` nas
+fronteiras (`0`, `999`, `1024`, e um valor em MB).
 
-- `fmtBytes` nas fronteiras (999 → `999`, 1024 → `1.0k`, 0 → `0`)
-- `pushLog` nunca passa de `LOG_MAX` e mantém o mais novo em cima
-- `entryLines` de 15 mudanças devolve 4 linhas, a última sendo `... +12 more`
+**[rev]** Os outros dois asserts do rascunho foram cortados — um testava `array.pop()`,
+o outro testava uma função que deixou de existir. YAGNI vale pra teste também.
 
-Um bloco, no estilo flat de `assert` do arquivo. Sem framework.
+## G. O HUD encolhe sozinho
+
+A cidade roda numa janela de picture-in-picture do tamanho de um cartão de visita, então
+o HUD tem que perder peças por prioridade em vez de vazar pra fora.
+
+O que estava no caminho não era o breakpoint: eram os `<span class="sep">·</span>`
+escritos à mão. Um separador escrito no markup sobrevive ao que ele separa — esconder a
+branch deixaria um ponto órfão, e cada regra de `display:none` teria que esconder um
+irmão junto. O ponto passa a ser gerado:
+
+```css
+#hud > *:not(:first-child)::before { content: "·"; margin-right: 10px; }
+```
+
+Agora cada item carrega o próprio separador e o leva embora quando some — inclusive o
+`#r-status`, que já era escondido por `[data-ok="ok"]` e deixava um espaçamento
+assimétrico antes disso.
+
+A ordem no markup é a ordem de morte: `repo · branch · clock · perf · status`.
+
+- `≤ 460px` — cai `#r-perf` (fps/heap: interessante, nunca essencial).
+- `≤ 340px` — cai `#r-branch`.
+
+`repo` e `clock` nunca caem: são as duas coisas que dizem *qual* cidade é essa e que ela
+ainda está viva. `#r-status` também fica — só aparece quando algo quebrou.
+
+CSS puro, zero JS: um `Document Picture-in-Picture` carrega o próprio viewport, então as
+media queries valem dentro dele sem ninguém medir nada.
 
 ## Fora de escopo
 

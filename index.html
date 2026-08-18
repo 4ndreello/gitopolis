@@ -22,7 +22,19 @@ body {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
   font-variant-numeric: tabular-nums;
 }
-#hud .sep { color: var(--ink-2); opacity: 0.5; }
+/* the dot is generated, never written in the markup: a hand-placed separator
+   outlives the thing it separates, so every rule that hides an item would have
+   to hide a sibling too. as a pseudo-element it leaves with its own item. */
+#hud > *:not(:first-child)::before {
+  content: "·";
+  color: var(--ink-2); opacity: 0.5;
+  margin-right: 10px;
+}
+/* the hud drops items by priority as the window narrows — this thing is meant
+   to live in a picture-in-picture the size of a business card. repo and clock
+   never go: which city this is, and that it is still alive. */
+@media (max-width: 460px) { #r-perf { display: none; } }
+@media (max-width: 340px) { #r-branch { display: none; } }
 #repo {
   pointer-events: auto;
   background: transparent; border: 0; padding: 0;
@@ -35,6 +47,19 @@ body {
 #r-status { color: var(--bad); }
 #r-status[data-ok="ok"] { display: none; }
 #r-status[data-ok="busy"] { color: var(--accent); }
+#r-perf { color: var(--ink-2); }
+/* font/margin are not inherited by <pre>: the UA sheet resets both. z-index
+   must clear #boot (5) or the panel hides behind the curtain during the cold
+   open, which is the one moment the ingest feed is interesting. the explicit
+   [hidden] rule is needed because an author `display` beats the UA one. */
+#dbg {
+  position: fixed; top: 8px; right: 10px; z-index: 6;
+  margin: 0; font: inherit; pointer-events: none;
+  color: var(--ink-2); line-height: 1.45;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.85);
+  font-variant-numeric: tabular-nums;
+}
+#dbg[hidden] { display: none; }
 /* covers the canvas while the city rises, so only the finished skyline shows */
 #boot {
   position: fixed; inset: 0; z-index: 5;
@@ -52,12 +77,12 @@ body {
 <canvas id="cv"></canvas>
 <div id="hud">
 <select id="repo"></select>
-<span class="sep">·</span>
 <span id="r-branch">…</span>
-<span class="sep">·</span>
 <b id="r-clock">00:00</b>
+<span id="r-perf">--</span>
 <span id="r-status" data-ok="busy">conectando…</span>
 </div>
+<pre id="dbg" hidden></pre>
 <div id="boot">
 <span id="boot-txt">conectando…</span>
 <span id="boot-bar"><i></i></span>

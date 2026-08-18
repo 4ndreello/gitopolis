@@ -191,6 +191,15 @@ export function dayIndex(now) {
   return Math.floor(now / DAY_MS);
 }
 
+// bytes for a one-line log: three significant figures, never a decimal point
+// on a raw byte count. sits next to clockLabel because it is the same kind of
+// thing — a pure formatter the test can import with no DOM.
+export function fmtBytes(n) {
+  if (n < 1024) return String(Math.round(n));
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}k`;
+  return `${(n / 1048576).toFixed(1)}M`;
+}
+
 export function clockLabel(t) {
   const mins = Math.floor(t * 1440) % 1440;
   const h = String(Math.floor(mins / 60)).padStart(2, "0");

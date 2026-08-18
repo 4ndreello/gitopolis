@@ -65,7 +65,7 @@ function parseStatus(out) {
 }
 
 async function scan() {
-  if (!active) return { repo: null, branch: "", files: [] };
+  if (!active) return { repo: null, branch: "", watching: false, files: [] };
   // -c cached + -o others, --exclude-standard honours .gitignore for free.
   // that one flag is what keeps node_modules from becoming 40k buildings.
   const [listOut, statusOut, branchOut] = await Promise.all([
@@ -90,18 +90,23 @@ async function scan() {
     files.push({ path, bytes: st.size, mtime: st.mtimeMs, dirty: dirty.has(path) });
   }
 
-  return { repo: active.name, branch: branchOut.trim(), files };
+  // recursive watch can fail to open; when it does everything falls back to the
+  // 700ms poll and the latency floor triples with nothing on screen saying so.
+  return { repo: active.name, branch: branchOut.trim(), watching: watcher !== null, files };
 }
 
 // ---- clients ----
 const clients = new Set();
 let lastPayload = null;
 
-function broadcast(snapshot) {
+// `ms` is deliberately kept out of the dedup baseline. it changes on every
+// scan, so folding it into `body` would make the 700ms poll emit a fresh
+// payload forever and turn an idle repo into a permanent broadcast.
+function broadcast(snapshot, ms) {
   const body = JSON.stringify(snapshot);
   if (body === lastPayload) return; // nothing moved, stay quiet
   lastPayload = body;
-  const frame = `data: ${body}\n\n`;
+  const frame = `data: ${JSON.stringify({ ...snapshot, ms })}\n\n`;
   for (const res of clients) res.write(frame);
 }
 
@@ -110,8 +115,9 @@ function schedule(delay) {
   if (pending) clearTimeout(pending);
   pending = setTimeout(async () => {
     pending = null;
+    const t0 = performance.now();
     try {
-      broadcast(await scan());
+      broadcast(await scan(), Math.round(performance.now() - t0));
     } catch (err) {
       console.error("scan failed:", err.message);
     }
@@ -187,7 +193,9 @@ const server = createServer(async (req, res) => {
       // every client, and setting it here on behalf of one arrival suppressed
       // the post-switch broadcast to all the others. a duplicate frame to this
       // one client is harmless — snapshots are idempotent.
-      res.write(`data: ${JSON.stringify(await scan())}\n\n`);
+      const t0 = performance.now();
+      const snap = await scan();
+      res.write(`data: ${JSON.stringify({ ...snap, ms: Math.round(performance.now() - t0) })}\n\n`);
     } catch (err) {
       res.write(`data: ${JSON.stringify({ error: err.message })}\n\n`);
     }
