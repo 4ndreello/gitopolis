@@ -1,7 +1,7 @@
 # Holofotes: torres lavadas de baixo à noite
 
 Data: 2026-08-17
-Estado: aprovado, não implementado
+Estado: implementado
 
 ## Problema
 
@@ -55,11 +55,16 @@ Em `src/props.js`, ao lado das que já existem:
   zero no topo, **e fade nas bordas laterais**. Sem o fade lateral o quad
   aparece como um retângulo colado na parede; é o mesmo motivo pelo qual
   `mkPoolTex` termina em alpha zero na borda.
+- `GEO_FLOODPOOL` — quatro quads horizontais, um sob cada fixture, com o `y`
+  cravado em 0.115: o topo da placa do quarteirão está em 0.11, e main.js escala
+  esse mesh só em x e z, porque um quad deitado não liga para escala em y.
 
 Em `src/main.js`:
 
 - `washMat` — `MeshBasicMaterial`, cor `0xbfd6ff`, `blending: AdditiveBlending`,
   `transparent: true`, `depthWrite: false`, `fog: false`, `opacity: 0`.
+- `floodPoolMat` — o mesmo, com a textura de poça do poste (`mkPoolTex`) e a cor
+  `0xcfe0ff`.
 
 A cor é fria de propósito. As janelas, os postes, as poças e os faróis são todos
 ocre; um holofote ocre funde com a janela acesa que está logo acima dele. O
@@ -68,7 +73,7 @@ dentro do prédio".
 
 ### Como se move
 
-Os dois meshes são filhos do `group` do prédio, criados em `makeBuilding` junto
+Os três meshes são filhos do `group` do prédio, criados em `makeBuilding` junto
 com `cap`. Sendo filhos, nascem, crescem, e são removidos com o prédio sem
 nenhum código de ciclo de vida novo.
 
@@ -77,6 +82,7 @@ Em `updateBuilding`, junto com o resto do corpo:
 ```
 wash.scale.set(b.w + 0.024, h / 3, b.d + 0.024)
 flood.scale.set(b.w, 1, b.d)
+pool.scale.set(b.w, 1, b.d)
 ```
 
 O `+0.024` afasta a lavagem 0.012 da parede em cada lado — coplanar com a
@@ -86,12 +92,14 @@ fachada ela z-fighta, pelo mesmo motivo documentado na pilha de `Y_*`. A altura
 Em `tick`, uma linha ao lado de `streetMat.emissiveIntensity = night`:
 
 ```
-washMat.opacity = night * 0.55
+washMat.opacity = night
+floodPoolMat.opacity = night * 0.8 * (1 - weather.rain * 0.4)
 ```
 
-e os meshes de wash escondidos quando `night < 0.01` — um quad aditivo com
-opacidade zero ainda custa um draw call, que é exatamente o que o comentário do
-`pools` já registra.
+e wash e poça escondidos quando `night < 0.02` — um quad aditivo com opacidade
+zero ainda custa um draw call, que é exatamente o que o comentário do `pools` já
+registra. A poça desbota na chuva pela mesma razão que a do poste: asfalto
+molhado espalha a luz em vez de devolver um disco.
 
 Os fixtures não precisam de linha nenhuma: `streetMat.emissiveIntensity = night`
 já existe e já os acende.
@@ -108,7 +116,9 @@ de andaime (nos cantos) não passam.
 
 ## Custo
 
-- +2 draw calls por torre. Zero luzes, zero recompilação de shader.
+- +3 draw calls por torre (fixtures, lavagem, poça); lavagem e poça só à noite.
+  Medido: 228 draw calls de dia, 255 à noite, num repo de 17 arquivos com 11
+  torres. Zero luzes, zero recompilação de shader.
 - `src/city.js` não muda, logo `test.mjs` não muda.
 
 ## Ceilings aceitos
@@ -133,9 +143,24 @@ visual e headless, do jeito que o CLAUDE.md já descreve:
   confirmar que o número bate com o número de prédios com `cap`.
 - Screenshot com `window.__time(0.9)` (noite congelada) antes e depois.
 
+## O que a implementação mudou em relação ao spec
+
+Duas coisas só apareceram com a coisa na tela, as duas medidas em screenshot
+headless com `__time(0.92)`:
+
+- **`0.55` de opacidade era invisível.** No papel um aditivo a `0.55` de um azul
+  claro sobre parede escura parece muito; na cena tonemapeada não dava para
+  distinguir da parede — a luminância média entre `__toggle("flood")` ligado e
+  desligado diferia em 0.003. Foi para `night` cheio. O teste que separou "fraco
+  demais" de "no lugar errado" foi pintar o material de vermelho puro por um
+  build: apareceu na hora, o que provou que geometria e posição estavam certas.
+- **A poça no chão entrou.** Estava fora de escopo com a nota "entra se a base
+  ficar seca", e ficou: à distância de casa a parede é uma lasca de pixels e a
+  calçada é uma superfície larga virada para a câmera, então é a poça que carrega
+  o efeito de longe — exatamente como as poças dos postes são o que mais se lê na
+  cidade noturna.
+
 ## Fora de escopo
 
-- Poça aditiva no chão sob cada fixture. A lavagem já ilumina a base; entra se a
-  base ficar seca.
 - Holofote reagindo a evento de arquivo.
 - Cor por distrito ou por padrão de fachada.

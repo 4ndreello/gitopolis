@@ -165,6 +165,33 @@ first few roofs spend the whole pool and the rest of the city celebrates, or
 burns, in silence. New files are born dirty and never flip, so the cold open
 stays quiet.
 
+### Floodlights: the city points a light at its towers
+
+Every tower (`!house && floors > 8`, the same test that gives it a `cap`) carries three
+extra meshes, all children of its own group so they rise and die with it: `GEO_FLOOD`
+(four fixtures on the paving, lit by the glow texel like a lamp head), `GEO_WASH` (four
+quads hugging the walls, additive, `h / 3` tall) and `GEO_FLOODPOOL` (four puddles on the
+plate, the lamp's own pool texture in a colder colour). No `THREE.SpotLight` anywhere —
+a real light costs on every lit material in the scene and recompiles shaders when the
+count changes.
+
+The wash is cold (`0xbfd6ff`) against a city where every other light is ochre, so it
+reads as light aimed AT the building rather than light coming out of it.
+
+Two things were measured, not guessed:
+
+- **the wash alone does not carry.** At home distance the wall is a sliver and the
+  paving is a wide surface facing the camera, so the ground pool is the half of the
+  effect you actually see from there — the same reason the lamp pools are the most
+  legible thing in the night city.
+- **`0.55` opacity was invisible.** Additive, cold, over a dark tonemapped wall, it
+  moved mean frame luminance by 0.003 — nothing. It runs at full `nightK` now. If a
+  future additive layer ever "does not render", paint the material pure red for one
+  build before touching the geometry: that is what proved the quads were in the right
+  place all along.
+
+`__toggle("flood")` A/Bs it in a live scene and `__city().floods` counts the lit towers.
+
 ### src/props.js: procedural props
 
 Vehicles, lamp posts, bus stops, bins, hydrants and sign posts are each **one merged

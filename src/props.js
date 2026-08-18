@@ -209,3 +209,77 @@ export function mkPoolTex() {
   t.colorSpace = THREE.SRGBColorSpace;
   return t;
 }
+
+// ---- tower floodlights ----
+// four fixtures on the pavement at the foot of a tower, lens turned up at the
+// wall. the positions sit on a UNIT square, so main.js scales the merged
+// geometry by the building footprint and each one lands just outside its own
+// wall, whatever that building's width happens to be.
+//
+// ponytail: that scale is non-uniform (w != d), so the boxes get squeezed by up
+// to ~10% across the range of footprints. invisible at this size; the fix, if
+// it ever is not, is four separate meshes instead of one merged one.
+const floodAt = (x, z, ry = 0) => [
+  { w: 0.085, h: 0.05, d: 0.06, x, y: 0.025, z, ry, color: METAL },
+  { w: 0.062, h: 0.012, d: 0.038, x, y: 0.056, z, ry, color: 0xdfd8c8, glow: GLOW_WHITE },
+];
+export const GEO_FLOOD = merge([
+  ...floodAt(0, 0.57), ...floodAt(0, -0.57),
+  ...floodAt(0.57, 0, Math.PI / 2), ...floodAt(-0.57, 0, Math.PI / 2),
+]);
+
+// the light those fixtures throw: four quads hugging the walls, unit cube, open
+// top and bottom. this is the one geometry in the file that does NOT go through
+// part() — it is textured by a gradient, and part() collapses every uv onto a
+// single texel of the glow strip.
+const washQuad = (ry, x, z) => {
+  const g = new THREE.PlaneGeometry(1, 1);
+  if (ry) g.rotateY(ry);
+  g.translate(x, 0.5, z);
+  return g;
+};
+export const GEO_WASH = mergeGeometries([
+  washQuad(0, 0, 0.5),
+  washQuad(Math.PI, 0, -0.5),
+  washQuad(Math.PI / 2, 0.5, 0),
+  washQuad(-Math.PI / 2, -0.5, 0),
+]);
+
+// the wash itself. additive like the lamp pools, so it must reach zero alpha on
+// three sides: at the top, where the beam runs out, and on both edges, or the
+// quad reads as a lit rectangle taped to the wall instead of a beam.
+export function mkWashTex() {
+  const c = document.createElement("canvas");
+  c.width = 64; c.height = 128;
+  const g = c.getContext("2d");
+  const up = g.createLinearGradient(0, 128, 0, 0);
+  up.addColorStop(0, "rgba(255,255,255,0.92)");
+  up.addColorStop(0.3, "rgba(255,255,255,0.36)");
+  up.addColorStop(1, "rgba(255,255,255,0)");
+  g.fillStyle = up;
+  g.fillRect(0, 0, 64, 128);
+
+  const side = g.createLinearGradient(0, 0, 64, 0);
+  side.addColorStop(0, "rgba(0,0,0,0)");
+  side.addColorStop(0.5, "rgba(0,0,0,1)");
+  side.addColorStop(1, "rgba(0,0,0,0)");
+  g.globalCompositeOperation = "destination-in";
+  g.fillStyle = side;
+  g.fillRect(0, 0, 64, 128);
+
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+// the puddle each fixture throws on the paving. y is baked at 0.115 — just
+// above the 0.11 top of the block plate — because main.js scales this mesh by
+// the footprint on x and z only, and a horizontal quad does not care about y.
+const poolQuad = (x, z) => {
+  const g = new THREE.PlaneGeometry(0.46, 0.46).rotateX(-Math.PI / 2);
+  g.translate(x, 0.115, z);
+  return g;
+};
+export const GEO_FLOODPOOL = mergeGeometries([
+  poolQuad(0, 0.57), poolQuad(0, -0.57), poolQuad(0.57, 0), poolQuad(-0.57, 0),
+]);

@@ -8,7 +8,8 @@ import {
 } from "./city.js";
 import {
   TEX_GLOW, GEO_CAR, GEO_VAN, GEO_TRUCK, GEO_LAMP, GEO_BUSSTOP, GEO_BIN,
-  GEO_HYDRANT, GEO_SIGNPOST, mkSignTex, mkRoadTex, mkZebraTex, mkPoolTex,
+  GEO_HYDRANT, GEO_SIGNPOST, GEO_FLOOD, GEO_WASH, GEO_FLOODPOOL,
+  mkSignTex, mkRoadTex, mkZebraTex, mkPoolTex, mkWashTex,
 } from "./props.js";
 
 // ============================================================
@@ -311,6 +312,21 @@ const poolMat = new THREE.MeshBasicMaterial({
   map: mkPoolTex(), transparent: true, depthWrite: false, opacity: 0,
   blending: THREE.AdditiveBlending, fog: false,
 });
+// the beam a tower floodlight throws up its own wall. cold on purpose: every
+// other light in the city — windows, lamp heads, headlights, pools — is ochre,
+// and an ochre wash fuses with the lit windows right above it. this one has to
+// read as light the city points AT the building, not light coming out of it.
+const washMat = new THREE.MeshBasicMaterial({
+  map: mkWashTex(), color: 0xbfd6ff, transparent: true, depthWrite: false,
+  opacity: 0, blending: THREE.AdditiveBlending, fog: false,
+});
+// same puddle the lamps throw, in the floodlight's colour. it is the half of
+// the effect that carries at camera distance: from up here the paving is a big
+// flat surface facing the lens, and the wall is a sliver.
+const floodPoolMat = new THREE.MeshBasicMaterial({
+  map: mkPoolTex(), color: 0xcfe0ff, transparent: true, depthWrite: false,
+  opacity: 0, blending: THREE.AdditiveBlending, fog: false,
+});
 const scaffoldMat = new THREE.MeshStandardMaterial({ color: 0xe8a13a, roughness: 0.6, metalness: 0.2 });
 const craneMat = new THREE.MeshStandardMaterial({ color: 0xf0b455, roughness: 0.5, metalness: 0.3 });
 const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b5540, roughness: 0.9 });
@@ -354,6 +370,7 @@ const cityRoot = new THREE.Group();
 const groundRoot = new THREE.Group();
 scene.add(cityRoot, groundRoot);
 const buildings = new Map(); // path -> parts
+let floodOn = true;          // flipped by window.__toggle("flood")
 
 function worldPos(gx, gy) {
   return { x: gx - layout.gw / 2, z: gy - layout.gh / 2 };
@@ -393,6 +410,16 @@ function makeBuilding(f) {
     cap.castShadow = true;
     group.add(cap);
   }
+  // floodlights ride the same test as the cap: a tower, and nothing shorter.
+  // all three meshes are children of the group, so they rise, grow and die with
+  // the building without a line of lifecycle code of their own.
+  let wash = null, flood = null, pool = null;
+  if (!house && floors > 8) {
+    flood = new THREE.Mesh(GEO_FLOOD, streetMat);   // lit by the same nightK ramp as the lamps
+    wash = new THREE.Mesh(GEO_WASH, washMat);
+    pool = new THREE.Mesh(GEO_FLOODPOOL, floodPoolMat);
+    group.add(flood, wash, pool);
+  }
   let prop = null;
   if (!house && floors > 4) {
     prop = new THREE.Mesh(GEO_BOX, propMat);
@@ -422,7 +449,7 @@ function makeBuilding(f) {
   group.add(crane);
 
   const b = {
-    group, body, roof, cap, prop, mast, scaffold, crane, floors, house,
+    group, body, roof, cap, prop, mast, scaffold, crane, wash, flood, pool, floors, house,
     w: (house ? 0.80 : 0.70) + rand01(seed) * 0.12,
     d: (house ? 0.80 : 0.70) + rand01(seed + 7) * 0.12,
     spin: rand01(seed + 3) * Math.PI * 2,
@@ -474,6 +501,16 @@ function updateBuilding(f, t, dt) {
     b.cap.scale.set(b.w * 0.58, capH, b.d * 0.58);
     b.cap.position.y = h + capH / 2;
   }
+  if (b.wash) {
+    // 0.012 clear of each wall: coplanar with the facade it z-fights, the same
+    // reason the Y_* stack exists. the beam dies a third of the way up, so it
+    // describes the base of the tower instead of washing out the lit windows.
+    b.wash.scale.set(b.w + 0.024, Math.max(0.001, h / 3), b.d + 0.024);
+    b.wash.visible = b.pool.visible = floodOn && nightK(t) > 0.02;   // an additive quad at zero opacity still costs a draw
+    b.flood.scale.set(b.w, 1, b.d);
+    b.pool.scale.set(b.w, 1, b.d);
+  }
+
   const top = h + capH + 0.06;
   if (b.prop) {
     b.prop.scale.set(b.w * 0.3, 0.12, b.d * 0.3);
@@ -1514,6 +1551,8 @@ function tick(ts) {
   const night = nightK(t);
   streetMat.emissiveIntensity = night;
   poolMat.opacity = night * 0.55 * (1 - weather.rain * 0.4);
+  washMat.opacity = night;
+  floodPoolMat.opacity = night * 0.8 * (1 - weather.rain * 0.4);
   if (pools) pools.visible = night > 0.02;
 
   updateCars(dt, trafficAt(t), night);
@@ -1589,6 +1628,7 @@ window.__city = () => ({
   raining: rainPoints.visible,
   watching,
   ms: scanMs,
+  floods: [...buildings.values()].filter(b => b.wash).length,
 });
 // freeze the clock at a fixed hour for screenshots; pass null to resume
 window.__time = (t) => { frozenT = t; };
@@ -1600,6 +1640,7 @@ window.__toggle = (what) => {
   if (what === "clouds") cloudsOn = !cloudsOn;
   if (what === "city") cityRoot.visible = !cityRoot.visible;
   if (what === "ground") groundRoot.visible = !groundRoot.visible;
+  if (what === "flood") floodOn = !floodOn;
 };
 
 frameCamera();
