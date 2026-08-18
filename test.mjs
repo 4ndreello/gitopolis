@@ -1,6 +1,7 @@
 // smallest thing that fails if the derivation breaks.
 // run: node test.mjs
 import assert from "node:assert/strict";
+import { cheat, mergeWeather, mountCheat } from "./src/cheat.js";
 import { fitDistance, fillFor, frameFraction, dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus, fmtBytes } from "./src/city.js";
 
 // --- fmtBytes stays three characters wide across the unit boundaries ---
@@ -270,6 +271,15 @@ assert.equal(frameFraction(1600, 1000), 1, "a desktop still gets the whole city"
   }
 }
 
+// --- cheats override the world without replacing it ---
+// mergeWeather is the whole cheat model in one function: null follows the day,
+// a number wins, and per field so forcing one knob does not freeze the other.
+const auto = { overcast: 0.4, rain: 0.1 };
+assert.deepEqual(mergeWeather(auto, { rain: null, overcast: null }), auto, "no cheat set means the world's own weather");
+assert.equal(mergeWeather(auto, { rain: 1, overcast: null }).overcast, 0.4, "forcing rain must leave overcast on auto");
+// the one that a `||` would get wrong: 0 is an override, not an absence
+assert.equal(mergeWeather({ overcast: 0.9, rain: 0.8 }, { rain: 0, overcast: null }).rain, 0, "a cheat of zero must beat the world, not fall through to it");
+
 // --- cover: a small window crops, it does not shrink the city to fit ---
 {
   const arg = [20, 3.9, 32, 0.7, 52, 0.9];           // portrait, horizontally starved
@@ -279,4 +289,49 @@ assert.equal(frameFraction(1600, 1000), 1, "a desktop still gets the whole city"
   assert.ok(Math.min(s.x, s.y) > 0.9 - 1e-6, "the tight axis is filled, not left over");
   assert.ok(Math.max(s.x, s.y) > 1, "and the other one is allowed to run off the edge");
   assert.equal(fitDistance(...arg), contain, "contain stays the default");
+}
+
+// --- the panel wires a drag to the override and the value back to auto ---
+// a stub document instead of a browser: mountCheat only ever calls append,
+// addEventListener and classList, and the rAF loop makes real chromium hang.
+{
+  const mk = () => {
+    const n = { children: [], attrs: {}, on: {}, className: "", textContent: "", style: {} };
+    n.append = (...c) => n.children.push(...c);
+    n.addEventListener = (ev, fn) => { n.on[ev] = fn; };
+    n.classList = { toggle: (c, v) => { n[c] = v; } };
+    n.toggleAttribute = (a, v) => { n.attrs[a] = v; };
+    n.hasAttribute = (a) => !!n.attrs[a];
+    return n;
+  };
+  globalThis.document = { createElement: mk, activeElement: null };
+  const root = mk();
+  let time = null, toggled = null;
+  const sync = mountCheat(root, {
+    setTime: (v) => { time = v; },
+    getTime: () => time,
+    toggle: (n) => { toggled = n; },
+  });
+  // rows land in order after the <h4>: hora, chuva, nublado, nuvens, trânsito
+  const row = (i) => root.children[1 + i];
+  const [input, val] = [1, 2].map(j => row(1).children[j]);   // chuva
+
+  input.value = 50; input.on.input();
+  assert.equal(cheat.rain, 0.5, "dragging a slider writes the override as a 0..1 fraction");
+  val.on.click();
+  assert.equal(cheat.rain, null, "clicking the value column drops the knob back to auto");
+
+  row(0).children[1].value = 750; row(0).children[1].on.input();
+  assert.equal(time, 750 / 1440, "the hour knob goes through setTime, not the cheat object");
+
+  const flood = root.children[6].children.at(-1);
+  flood.on.click();
+  assert.equal(toggled, "flood", "the toggle row calls window.__toggle by name");
+
+  sync({ time: 60, rain: 20, overcast: 30, clouds: 4, traffic: 10 });
+  assert.equal(val.textContent, "20%", "a knob on auto displays the live value, not a stale one");
+  // the hour is still overridden from above: an override must out-rank the live
+  // value, or a forced sunset would tick back to the wall clock every 0.5s
+  assert.equal(row(0).children[2].textContent, "12:30", "an overridden knob keeps its own value while auto knobs track the world");
+  delete globalThis.document;
 }

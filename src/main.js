@@ -11,6 +11,7 @@ import {
   GEO_HYDRANT, GEO_SIGNPOST, GEO_FLOOD, GEO_WASH, GEO_FLOODPOOL,
   mkSignTex, mkRoadTex, mkZebraTex, mkPoolTex, mkWashTex,
 } from "./props.js";
+import { cheat, mergeWeather, mountCheat } from "./cheat.js";
 
 // ============================================================
 // state: one entry per file on disk. animation fields live here and
@@ -1322,12 +1323,22 @@ const el = {
   bootBar: document.querySelector("#boot-bar > i"),
   perf: document.getElementById("r-perf"),
   dbg: document.getElementById("dbg"),
+  cheat: document.getElementById("cheat"),
 };
+// the panel is built once, here, because window.__toggle is the only state it
+// drives that main.js already owns. the hour is not in `cheat`: it goes through
+// frozenT / window.__time, which every clock reader in this file already honours.
+const syncCheat = mountCheat(el.cheat, {
+  setTime: (v) => { frozenT = v; },
+  getTime: () => frozenT,
+  toggle: (name) => window.__toggle(name),
+});
 // F3 is "find again" in firefox, so the default has to go
 addEventListener("keydown", (e) => {
   if (e.key !== "F3") return;
   e.preventDefault();
   el.dbg.hidden = !el.dbg.hidden;
+  el.cheat.hidden = el.dbg.hidden;
 });
 // ---- debug panel ----
 // a switch sends this client two frames for the same event (its own /events
@@ -1560,9 +1571,11 @@ function tick(ts) {
     }
   }
 
-  const weather = weatherAt(dayIndex(Date.now()));
+  // the cheats fold in here, at the one place the day's weather is sampled, so
+  // an override reaches the rain, the sun, the fog and the cloud deck together
+  const weather = mergeWeather(weatherAt(dayIndex(Date.now())));
   const lim = Math.max(110, Math.max(layout.gw, layout.gh) * 1.2);
-  const deck = Math.round(3 + weather.overcast * 5);
+  const deck = cheat.clouds ?? Math.round(3 + weather.overcast * 5);
   clouds.forEach((c, i) => {
     c.position.x += c.userData.speed * dt * 2.4;
     if (c.position.x > lim) c.position.x = -lim;
@@ -1582,9 +1595,10 @@ function tick(ts) {
   floodPoolMat.opacity = night * 0.8 * (1 - weather.rain * 0.4);
   if (pools) pools.visible = night > 0.02;
 
-  updateCars(dt, trafficAt(t), night);
+  const flow = cheat.traffic ?? trafficAt(t);
+  updateCars(dt, flow, night);
   // people show up a little before the cars and linger a little later
-  updatePedestrians(dt, Math.min(1, trafficAt(t - 0.02) * 1.15));
+  updatePedestrians(dt, Math.min(1, (cheat.traffic ?? trafficAt(t - 0.02)) * 1.15));
   applyTime(t, weather);
   updateNightSky(t, weather.overcast);
   updateRain(dt, weather.rain);
@@ -1612,6 +1626,15 @@ function tick(ts) {
     // never `if (hidden) return` here: requestAnimationFrame(tick) is below
     // this block, so an early return freezes the city on the first close.
     if (!el.dbg.hidden) el.dbg.textContent = dbgText();
+    // the live values are what a knob on auto displays — the same numbers the
+    // frame just used, so the panel reads the world instead of guessing at it
+    if (!el.cheat.hidden) syncCheat({
+      time: Math.round(t * 1440) % 1440,
+      rain: Math.round(weather.rain * 100),
+      overcast: Math.round(weather.overcast * 100),
+      clouds: deck,
+      traffic: Math.round(flow * 100),
+    });
     fpsAcc = 0; fpsN = 0;
   }
 
@@ -1651,7 +1674,7 @@ window.__city = () => ({
   geo: renderer.info.memory.geometries,
   tex: renderer.info.memory.textures,
   heap: heapMB(),
-  overcast: weatherAt(dayIndex(Date.now())).overcast,
+  overcast: mergeWeather(weatherAt(dayIndex(Date.now()))).overcast,
   raining: rainPoints.visible,
   watching,
   ms: scanMs,

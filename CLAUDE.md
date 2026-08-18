@@ -264,17 +264,52 @@ adding an asset, know that this is a decision, not an oversight — the alternat
 evaluated and kept in reserve is Kenney's CC0 `.glb` city kits, which would slot into the
 same grid cells.
 
+### src/cheat.js: the cheats are an override layer, not state
+
+F3 opens the debug panel and, bottom right, a slider panel: hour, rain, overcast, cloud
+count, traffic, plus a button per `__toggle`. It is the clickable half of
+`window.__time` / `window.__toggle`, which is why the hour is *not* in the `cheat`
+object — it goes through `frozenT` like it always did, and every clock reader in
+`main.js` (including the floodlight and lamp ramps off `nightK(t)`) honours it for free.
+
+`cheat` holds one nullable field per knob, `null` meaning "follow the world", and it is
+read **at the sampling site**, never written back:
+
+- `mergeWeather(weatherAt(dayIndex(now)))` at the one line in `tick` that samples the
+  day. One override there reaches rain particles, sun intensity, fog, star opacity, the
+  cloud tint and the floodlight puddles together — anything that took `weather` already.
+- `cheat.clouds ?? deck` and `cheat.traffic ?? trafficAt(t)`.
+
+That placement is the whole design. `weatherAt` and `dayT` stay pure functions of the
+clock, nothing is persisted, and a reload is the same city again — the load-bearing
+invariant above survives a panel full of cheats because a cheat never becomes a fact.
+`mergeWeather` merges per field, not per object (`??` on each key): forcing rain must
+leave overcast on auto, and an override of `0` has to beat the world, which is why it
+cannot be `||`. `test.mjs` covers both.
+
+A knob on auto is a live readout — `syncCheat` feeds it the numbers the frame just used,
+so the sliders track the day instead of showing a stale hour. An overridden knob keeps
+its value; clicking the value column is the reset back to auto. The panel is the only
+`pointer-events: auto` thing outside the hud, or a drag on a slider would reach
+OrbitControls.
+
+Verifying this headlessly: don't. `--virtual-time-budget` never expires against an
+endless `requestAnimationFrame`, and swiftshader makes it hang for minutes. `mountCheat`
+touches `document` only inside the function, so `test.mjs` mounts it against a
+twenty-line stub instead.
+
 ## Debugging the renderer
 
 `src/main.js` exposes two hooks on `window` for headless inspection:
 
 ```js
 window.__city()            // { files, dirty, growing, dying, cranes, minGrown, dust }
-window.__toggle("dust")    // also "cars", "clouds", "city", "ground"
+window.__toggle("dust")    // also "cars", "clouds", "city", "ground", "flood"
+window.__time(0.75)        // freeze the hour; null resumes. the F3 slider writes this
 ```
 
-`--virtual-time-budget` never expires against the endless `requestAnimationFrame`,
-so `--screenshot` and `--dump-dom` hang. Driving the
+`--virtual-time-budget` never expires against the endless `requestAnimationFrame`
+(see the cheat panel section above), so `--screenshot` and `--dump-dom` hang. Driving the
 page over CDP does work and needs no puppeteer — node's global `WebSocket`, a
 `Target.attachToTarget {flatten:true}` session, `Emulation.setDeviceMetricsOverride`
 for the viewport (`--window-size` alone does not set it under `--headless=new`), a
