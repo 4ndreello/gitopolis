@@ -35,13 +35,25 @@ body {
    never go: which city this is, and that it is still alive. */
 @media (max-width: 460px) { #r-perf { display: none; } }
 @media (max-width: 340px) { #r-branch { display: none; } }
+/* a native <select multiple> is the whole picker: keyboard accessible, four
+   rows visible, no widget to maintain. it is the only listbox in the hud, so it
+   is styled to look like the rest of the text rather than like a form control.
+   chromium paints a selected option's background itself and ignores
+   `background-color` on it — the gradient is the one declaration it honours. */
 #repo {
-  pointer-events: auto;
-  background: transparent; border: 0; padding: 0;
+  pointer-events: auto; align-self: flex-start;
+  background: rgba(19, 29, 39, 0.72);
+  border: 1px solid rgba(203, 215, 226, 0.14); border-radius: 3px;
+  padding: 2px 3px;
   color: var(--ink); font: inherit; font-weight: 600;
   cursor: pointer; outline: none;
+  max-width: 150px; scrollbar-width: thin;
 }
-#repo option { background: #131d27; color: var(--ink); }
+#repo option { background: #131d27; color: var(--ink); padding: 0 3px; }
+#repo option:checked {
+  background: linear-gradient(0deg, var(--accent), var(--accent));
+  color: #0d141c;
+}
 #r-branch { color: var(--accent); }
 #r-clock { font-weight: 600; }
 #r-status { color: var(--bad); }
@@ -106,7 +118,7 @@ body {
 <body>
 <canvas id="cv"></canvas>
 <div id="hud">
-<select id="repo"></select>
+<select id="repo" multiple size="4" title="até 4 repos"></select>
 <span id="r-branch">…</span>
 <b id="r-clock">00:00</b>
 <span id="r-perf">--</span>

@@ -17,14 +17,22 @@ import { cheat, mergeWeather, mountCheat } from "./cheat.js";
 // state: one entry per file on disk. animation fields live here and
 // nowhere else — the city itself is never persisted.
 // ============================================================
-const files = new Map(); // path -> { path, bytes, target, dirty, grown, dying, flash, attn }
+// keyed by repo + "\0" + path: two repos can both hold src/index.js, and they
+// are different buildings that must not share a plot, a window schedule or a
+// lit pattern. `key` is carried on the entry so every identity hash downstream
+// reads one field instead of re-concatenating.
+const files = new Map(); // key -> { key, repo, path, bytes, target, dirty, grown, dying, flash, attn }
+const branches = new Map();  // repo -> branch, so the hud names every neighbourhood
 // a deleted file is gone from the map long before the camera finishes
 // travelling to it, so its plot outlives it here as a fading pull
 const ghosts = [];       // { x, z, w }
 let layout = planCity([]);
 let layoutDirty = true;
 
+// one snapshot carries one repo. everything below is scoped to it — the sweep
+// especially, see the loop that marks the dead.
 function ingest(snapshot) {
+  const repo = snapshot.repo ?? "";
   const seen = new Set();
   const done = [];   // cranes coming down this snapshot: one confetti burst each
   const gone = [];   // files deleted this snapshot: one smoke column each
@@ -32,12 +40,14 @@ function ingest(snapshot) {
   const grew = [];
   const died = [];
   for (const inc of snapshot.files) {
-    seen.add(inc.path);
-    const cur = files.get(inc.path);
+    const key = repo + "\0" + inc.path;
+    seen.add(key);
+    const cur = files.get(key);
     if (!cur) {
       // brand new: rises from nothing, scaffolding first
-      files.set(inc.path, {
-        path: inc.path, bytes: Math.max(96, inc.bytes), target: inc.bytes,
+      files.set(key, {
+        key, repo, path: inc.path,
+        bytes: Math.max(96, inc.bytes), target: inc.bytes,
         dirty: inc.dirty, grown: 0, dying: 0, flash: 0, attn: 1,
       });
       born.push(inc.path);
@@ -61,13 +71,16 @@ function ingest(snapshot) {
     }
     cur.dirty = inc.dirty;
   }
-  for (const [path, f] of files) {
-    if (!seen.has(path) && !f.dying) {
+  // f.repo === repo is the whole multi-repo correction here: a snapshot names
+  // one repo, so an unscoped sweep reads repo B's arrival as "every file in
+  // repo A vanished" and demolishes the neighbourhood next door.
+  for (const [key, f] of files) {
+    if (f.repo === repo && !seen.has(key) && !f.dying) {
       f.dying = 0.001;
       const w = fileWorld(f);
       ghosts.push({ x: w.x, z: w.z, w: 1 });
       gone.push(w);
-      died.push(path);
+      died.push(f.path);
     }
   }
   // one particle budget split across the whole commit: 40 files each asking for
@@ -87,8 +100,14 @@ function ingest(snapshot) {
     const n = Math.max(5, Math.min(FX.died.n, Math.round(DUST_MAX * 0.5 / gone.length)));
     for (const w of gone) fx("died", w.x, w.y * 0.5 + 0.3, w.z, n);
   }
-  if (snapshot.repo && el.repo.value !== snapshot.repo) el.repo.value = snapshot.repo;
-  el.branch.textContent = snapshot.branch || "?";
+  // no el.repo write any more: the picker is a multi-select and a snapshot no
+  // longer names "the" repo. branches are collected per repo and deduped, so
+  // four repos on main read as one word instead of flickering between them.
+  // ponytail: the dedup drops which repo is on which branch, so four repos on
+  // four branches read as four bare words. name them (`repo:branch`) if that
+  // ever comes up — it costs the hud width the pip layout is short of.
+  branches.set(repo, snapshot.branch || "?");
+  el.branch.textContent = [...new Set(branches.values())].join(" ");
   logSnapshot(snapshot, born, grew, died, done.length);
 }
 
@@ -399,7 +418,7 @@ function bodyGeo(floors) {
 const cityRoot = new THREE.Group();
 const groundRoot = new THREE.Group();
 scene.add(cityRoot, groundRoot);
-const buildings = new Map(); // path -> parts
+const buildings = new Map(); // key (repo + "\0" + path) -> parts
 let floodOn = true;          // flipped by window.__toggle("flood")
 
 function worldPos(gx, gy) {
@@ -408,9 +427,12 @@ function worldPos(gx, gy) {
 
 function makeBuilding(f) {
   const floors = floorsOf(f.bytes);
-  const seed = hash(f.path);
+  // identity off the composite key, file *type* off the bare path: two .rs
+  // files are the same colour in every repo, which is the point of colouring
+  // by extension, but they are never the same building.
+  const seed = hash(f.key);
   const idx = hash(extOf(f.path)) % FACADE.length;
-  const pat = hash(dirKey(f.path)) % facadeMats.length;
+  const pat = hash(f.repo + "\0" + dirKey(f.path)) % facadeMats.length;
   const house = isHouse(floors);
   const group = new THREE.Group();
 
@@ -492,27 +514,27 @@ function makeBuilding(f) {
     spin: rand01(seed + 3) * Math.PI * 2,
     facade, lit: 0,
   };
-  buildings.set(f.path, b);
+  buildings.set(f.key, b);
   cityRoot.add(group);
   return b;
 }
 
-function disposeBuilding(path) {
-  const b = buildings.get(path);
+function disposeBuilding(key) {
+  const b = buildings.get(key);
   if (!b) return;
   cityRoot.remove(b.group);
   if (b.facade) b.facade.dispose();   // cloned per building, so nothing else holds it
   if (b.wash) b.wash.material.dispose();   // ditto
-  buildings.delete(path);
+  buildings.delete(key);
 }
 
 function updateBuilding(f, t, dt) {
-  let b = buildings.get(f.path);
+  let b = buildings.get(f.key);
   const floors = floorsOf(f.bytes);
-  if (b && b.floors !== floors) { disposeBuilding(f.path); b = null; }
+  if (b && b.floors !== floors) { disposeBuilding(f.key); b = null; }
   if (!b) b = makeBuilding(f);
 
-  const p = layout.pos.get(f.path);
+  const p = layout.pos.get(f.key);
   if (!p) { b.group.visible = false; return; }
   b.group.visible = true;
 
@@ -610,7 +632,7 @@ function updateBuilding(f, t, dt) {
   if (b.facade) {
     // ease rather than snap: a window coming on over a fraction of a second
     // reads as somebody flicking a switch; an instant flip reads as a bug
-    const want = litAt(f.path, t) * 0.85;
+    const want = litAt(f.key, t) * 0.85;
     b.lit += (want - b.lit) * Math.min(1, dt * 2.5);
     b.facade.emissiveIntensity = b.lit;
   }
@@ -840,9 +862,23 @@ function rebuildFurniture() {
   // one named sign per district, on the corner nearest the origin. the plate is
   // the only prop with per-instance text, so it is the only one that allocates.
   const named = blocks.filter(b => b.dir);
-  signCount = named.length;
-  if (!named.length) return;
-  const posts = new THREE.InstancedMesh(GEO_SIGNPOST, streetMat, named.length);
+  // and one per repo, at the near corner of its rectangle. the green belt on
+  // its own reads as leftover space at home distance — the sign is what says a
+  // neighbourhood starts here. same post, same material, scaled up.
+  const stride = layout.block + GUT;
+  const repoSigns = layout.repos.filter(r => r.name).map(r => {
+    // the same corner `kerb` gives a district, computed from the rectangle's
+    // first cell rather than re-deriving the half-step and the overhang by
+    // hand — those are one constant away from drifting apart.
+    const k = kerb({ bx: r.cx * stride, by: r.cy * stride, size: layout.block });
+    // then one more step out along the diagonal. that corner cell is usually a
+    // district, and its own post stands on exactly this spot: the 2.4x post
+    // would swallow it whole with their sides coplanar.
+    return { name: r.name, x: k.x - k.half - 0.55, z: k.z - k.half - 0.55 };
+  });
+  signCount = named.length + repoSigns.length;
+  if (!signCount) return;
+  const posts = new THREE.InstancedMesh(GEO_SIGNPOST, streetMat, signCount);
   posts.castShadow = true;
   named.forEach((blk, i) => {
     const k = kerb(blk);
@@ -858,6 +894,22 @@ function rebuildFurniture() {
     // the plate hangs off the post along its own width axis, which the 45°
     // turn has already rotated — offsetting in world x alone leaves it skewered
     plate.position.set(k.x - k.half + 0.155, Y_KERB + 0.47, k.z - k.half - 0.155);
+    plate.rotation.y = Math.PI / 4;
+    groundRoot.add(plate);
+  });
+  repoSigns.forEach((r, i) => {
+    // 2.4x the district post, so the name reads at home distance where a
+    // district plate is already a smudge
+    m.makeScale(2.4, 2.4, 2.4);
+    m.setPosition(r.x, Y_KERB, r.z);
+    posts.setMatrixAt(named.length + i, m);
+
+    const tex = mkSignTex(r.name);
+    const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.8, side: THREE.DoubleSide });
+    disposables.push(tex, mat);
+    const plate = new THREE.Mesh(new THREE.PlaneGeometry(1.06, 0.265), mat);
+    disposables.push(plate.geometry);
+    plate.position.set(r.x + 0.37, Y_KERB + 1.13, r.z - 0.37);
     plate.rotation.y = Math.PI / 4;
     groundRoot.add(plate);
   });
@@ -1206,7 +1258,7 @@ function updateRain(dt, amount) {
 }
 
 function fileWorld(f) {
-  const p = layout.pos.get(f.path);
+  const p = layout.pos.get(f.key);
   if (!p) return { x: 0, y: 0, z: 0 };
   const { x, z } = worldPos(p.gx, p.gy);
   return { x, y: floorsOf(f.bytes) * FLOOR_H * (f.grown || 1), z };
@@ -1413,14 +1465,17 @@ function logSnapshot(snap, born, grew, died, cranes) {
   // one file touched is the common case and the only one worth a name; past
   // that the counts read faster than a truncated list of paths.
   const only = born.length + grew.length + died.length === 1;
+  // four neighbourhoods can all hold a `src/index.js`, so a bare path in the
+  // feed no longer says which one moved
+  const at = (p) => (snap.repo ? `${snap.repo}/${p}` : p);
   let what;
   if (only && grew.length) {
     const g = grew[0];
-    what = `~ ${g.path}  ${fmtBytes(g.from)} -> ${fmtBytes(g.to)}`;
+    what = `~ ${at(g.path)}  ${fmtBytes(g.from)} -> ${fmtBytes(g.to)}`;
   } else if (only && born.length) {
-    what = `+ ${born[0]}`;
+    what = `+ ${at(born[0])}`;
   } else if (only) {
-    what = `- ${died[0]}`;
+    what = `- ${at(died[0])}`;
   } else {
     what = `+${born.length} ~${grew.length} -${died.length}`;
   }
@@ -1462,6 +1517,12 @@ function setStatus(text, state) {
 // null = done. the tick loop owns the "rise" -> null transition, which is what
 // lifts the boot curtain — the city is only ever revealed finished.
 let phase = null, phaseRepo = "";
+const MAX_REPOS = 4;
+// names, not a message count: a repo nobody else is watching answers the
+// connect scan and its own first poll tick with the same snapshot, so counting
+// arrivals would lift the curtain while a second repo is still empty ground.
+const reported = new Set();
+let wantRepos = [];
 function setBoot(text, pct) {
   if (el.bootTxt.textContent !== text) el.bootTxt.textContent = text;
   el.bootBar.style.width = `${pct}%`;
@@ -1471,26 +1532,59 @@ function setBoot(text, pct) {
 // every vanished file as dying, so the old city crumbles while the new one
 // rises under scaffolding. the transition comes for free.
 let es = null;
-function connect(name) {
+function connect(names) {
   if (es) es.close();
+  wantRepos = names || [];
   phase = "wait";
-  phaseRepo = name || "cidade";
+  reported.clear();
+  branches.clear();
+  phaseRepo = wantRepos.join(" + ") || "cidade";
   el.boot.classList.remove("done");
   setBoot(`construindo ${phaseRepo}`, 0);
-  es = new EventSource(name ? `/events?repo=${encodeURIComponent(name)}` : "/events");
+  // one stream for the whole set, repeated repo= params. four streams would be
+  // four watchers and four reconnect storms for a set that changes together.
+  // a repo dropped from the set gets no further snapshots, so the scoped sweep
+  // in ingest can never notice it went — deselecting one used to leave its
+  // neighbourhood standing forever. connect is the only place that knows the
+  // subscription itself changed, which is why the retirement lives here.
+  const dropped = [];
+  for (const f of files.values()) {
+    if (wantRepos.includes(f.repo) || f.dying) continue;
+    f.dying = 0.001;
+    const w = fileWorld(f);
+    ghosts.push({ x: w.x, z: w.z, w: 1 });
+    dropped.push(w);
+  }
+  // same pool split as ingest: a whole repo leaving at once is the largest
+  // demolition there is, and the first few roofs must not spend it all
+  if (dropped.length) {
+    const n = Math.max(5, Math.min(FX.died.n, Math.round(DUST_MAX * 0.5 / dropped.length)));
+    for (const w of dropped) fx("died", w.x, w.y * 0.5 + 0.3, w.z, n);
+  }
+  const q = wantRepos.map(n => `repo=${encodeURIComponent(n)}`).join("&");
+  es = new EventSource(q ? `/events?${q}` : "/events");
   es.onerror = () => {
     setStatus("sem conexão", "bad");
     if (phase) setBoot("sem conexão", 0);
   };
   es.onmessage = (ev) => {
     const snap = JSON.parse(ev.data);
-    if (snap.error) { setStatus(snap.error, "bad"); if (phase) setBoot(snap.error, 0); return; }
+    // a repo that answers with an error has still answered. counting it only on
+    // success was harmless with one repo — an error meant there was nothing to
+    // reveal anyway — but with four it holds the curtain down over three
+    // healthy neighbourhoods that are already built and merely hidden behind
+    // it. one unreadable repo must cost its own quarter, not the whole city.
+    reported.add(snap.repo ?? "");
+    // the curtain only lifts once every subscribed neighbourhood has reported;
+    // otherwise the city is revealed with a hole where repo B will be
+    if (phase === "wait" && reported.size >= Math.max(1, wantRepos.length)) phase = "rise";
+    if (snap.error) { setStatus(`${snap.repo}: ${snap.error}`, "bad"); return; }
     setStatus("ligado", "ok");
-    if (phase === "wait") phase = "rise";
     ingest(snap);
   };
 }
 
+let picked = [];
 fetch("/repos")
   .then(r => r.json())
   .then(names => {
@@ -1499,17 +1593,28 @@ fetch("/repos")
       o.value = o.textContent = name;
       el.repo.append(o);
     }
-    // the repo lives in the hash so F5 comes back to the one you were looking at
-    const want = decodeURIComponent(location.hash.slice(1));
-    const start = names.includes(want) ? want : names[0];
-    el.repo.value = start;
-    connect(start);
+    // the set lives in the hash as #a,b,c so F5 comes back to the same four
+    const want = location.hash.slice(1).split(",").filter(Boolean).map(decodeURIComponent);
+    picked = want.filter(n => names.includes(n)).slice(0, MAX_REPOS);
+    if (!picked.length && names.length) picked = [names[0]];
+    for (const o of el.repo.options) o.selected = picked.includes(o.value);
+    connect(picked);
   })
-  .catch(() => connect(null));
+  .catch(() => connect([]));
 
 el.repo.addEventListener("change", () => {
-  location.hash = encodeURIComponent(el.repo.value);
-  connect(el.repo.value);
+  const pick = [...el.repo.selectedOptions].map(o => o.value);
+  // revert rather than truncate. the server caps at four too, but silently
+  // dropping the fifth would leave the picker highlighting a repo that has no
+  // neighbourhood — and deselecting everything would hand you the server's
+  // fallback repo with nothing selected to say so.
+  if (!pick.length || pick.length > MAX_REPOS) {
+    for (const o of el.repo.options) o.selected = picked.includes(o.value);
+    return;
+  }
+  picked = pick;
+  location.hash = pick.map(encodeURIComponent).join(",");
+  connect(pick);
 });
 
 // ============================================================
@@ -1549,7 +1654,7 @@ function tick(ts) {
   }
 
   let growSum = 0, growN = 0;
-  for (const [path, f] of files) {
+  for (const [key, f] of files) {
     if (!f.dying) { growSum += f.grown; growN++; }
     const beforeFloors = floorsOf(f.bytes);
     // snap once close: the asymptotic approach can park bytes exactly on a
@@ -1581,8 +1686,8 @@ function tick(ts) {
     if (f.dying) {
       f.dying = Math.min(1, f.dying + dt * 1.5);
       if (f.dying >= 1) {
-        disposeBuilding(path);
-        files.delete(path);
+        disposeBuilding(key);
+        files.delete(key);
         layoutDirty = true;
         continue;
       }
@@ -1718,6 +1823,12 @@ window.__city = () => ({
   dust: dust.length,
   smoke: dust.filter(p => p.k).length,
   districts: layout.districts,
+  // per neighbourhood, in the order planCity laid them out
+  repos: layout.repos.map(r => ({
+    name: r.name,
+    files: [...files.values()].filter(f => f.repo === r.name).length,
+    dirty: [...files.values()].filter(f => f.repo === r.name && f.dirty).length,
+  })),
   cars: traffic.reduce((n, t) => n + t.mesh.count, 0),
   lamps: pools ? pools.count : 0,
   signs: signCount,
