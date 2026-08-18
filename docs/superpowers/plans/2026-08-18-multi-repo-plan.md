@@ -148,7 +148,77 @@ selected in the picker render as two neighbourhoods with a belt between them.
 
 ## Task 4 — `src/main.js`: instance facades by (pattern, colour)
 
-**Files:** `src/main.js`
+**Gated on a measurement. Do not start this task until task 3 has landed and the
+number below exists.**
+
+Measure first. The `ponytail:` comment this task acts on says "if a 2k-file repo
+ever *stutters*" — an observation, not a prediction — and the 2000-draw-call
+figure that motivated this task is an estimate nobody has confirmed. If it does
+not stutter, close the task and record the number.
+
+### Measurement protocol
+
+**Do not read fps.** `fps` (`main.js:1678-1680`) counts `requestAnimationFrame`
+callbacks, so it is capped by vsync: at four repos the renderer can sit at 7ms —
+one millisecond from dropping frames — and the F3 panel will still read a
+contented 120fps. It reports the ceiling, not the load.
+
+Read `window.__city()` instead, which already exposes the right counters
+(`main.js:1731-1734`):
+
+- `dc` — `renderer.info.render.calls`, the real draw call count
+- `tris`, `geo`, `tex` — triangle and resource counts
+
+The facade is not one draw call per building, so the estimate cannot be derived
+by arithmetic: `body` and `cap` share the cloned material but are separate
+meshes, and a dirty tower additionally carries scaffolding, a crane, beacons, a
+halo sprite, the wash, the flood fixtures and the pool. Isolate the share this
+task would actually remove by comparing `dc` with `__toggle("city")` on and off.
+
+Three samples, four real repos loaded:
+
+1. **Cold open, ~2s after boot.** This is the peak, not the commit. Every file is
+   new to the client on launch, so the entire city rises under scaffolding with
+   cranes and beacons at once — the maximum mesh count the scene will ever hold.
+2. **Idle**, once the city has settled.
+3. **Right after a commit** drops every crane.
+
+If GPU headroom is masking the cost, shrink the window to take the vsync ceiling
+out of the picture, or time a `renderer.render` call directly.
+
+Record all three `dc` values in the task report whether or not the work proceeds.
+
+There is also a cost discovered after the spec was written, which changes the
+trade:
+
+**`emissiveIntensity` is per building and `InstancedMesh` cannot express it.**
+`main.js:615` sets `b.facade.emissiveIntensity = b.lit`, eased per building from
+`litAt` at `main.js:613-614`, which is what makes windows come on one building at
+a time instead of the skyline flipping at once. A material uniform is shared by
+every instance in a bucket, so naive instancing lights a whole neighbourhood in
+lockstep — the opposite of the effect the easing exists to sell. `instanceColor`
+does not rescue it: in three it feeds `vColor`, which multiplies the diffuse, not
+the emissive (`node_modules/three/src/renderers/shaders/ShaderChunk/color_vertex.glsl.js:18`).
+
+If the measurement says the work is needed, the mechanism is an
+`InstancedBufferAttribute` `aLit` plus an `onBeforeCompile` patch multiplying
+`totalEmissiveRadiance` by it — the `emissiveMap` (the window pattern) is already
+on the material, so the patch is one line of GLSL. Note that this is the
+project's first custom shader; every material so far is stock three with a
+procedural texture. That is a real deviation and needs a comment saying why.
+
+Two things must survive the change:
+
+- `b.lit` stays a number on the building object, not only a buffer attribute —
+  `main.js:553` reads it to fade the floodlight wash out as the windows come up.
+- `b.wash.material` stays a per-tower clone; its opacity is per tower.
+  `disposeBuilding`'s `b.facade` release goes away with the per-building facade,
+  but the `b.wash` release must remain.
+
+**Do not** reach for the third option (bucketing by quantized `lit` level). It
+kills the easing and churns `instanceMatrix` every frame.
+
+### The mechanism, if the measurement calls for it
 
 `makeBuilding` (`main.js:409-421`) clones one material and adds one `Mesh` per
 building. Replace with one `InstancedMesh` per `(pattern, colour)` bucket —

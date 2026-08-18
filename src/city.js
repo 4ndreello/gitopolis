@@ -44,13 +44,37 @@ export function isHouse(floors) {
   return floors <= 2;
 }
 
+// the cell pitch. it used to be the largest district's exact size, which is
+// continuous: a district growing from 6 files to 7 changed the pitch and slid
+// every coordinate in the city. with one repo that was invisible during normal
+// editing; with four it means a district crossing a threshold in repo A
+// teleports every building in B, C and D — a repo you are not even looking at
+// reshuffles under an `npm i` somewhere else.
+export const BLOCK_STEPS = [2, 3, 4, 6, 8, 12, 16, 24, 32, 48];
+export const BELT = 1;   // cells of green belt between repo rectangles
+
+export function blockStep(n) {
+  for (const s of BLOCK_STEPS) if (s >= n) return s;
+  // 48 is a multiple of 16, so the tail keeps the table monotone and idempotent
+  return Math.ceil(n / 16) * 16;
+}
+
 // plots and districts are hashed, never index-assigned, so a file keeps its
 // address when siblings appear or vanish.
 export function planCity(files) {
   const byDir = new Map();
+  const ndOf = new Map();          // repo -> district count
   for (const f of files) {
-    const d = dirKey(f.path);
-    if (!byDir.has(d)) byDir.set(d, []);
+    const repo = f.repo ?? "";
+    // the repo prefixes the grouping *key*, not the path. prefixing the path
+    // would spend one level of DISTRICT_DEPTH on the repo name, so
+    // `gitopolis/src/three/foo.js` would collapse to `gitopolis/src` instead
+    // of `src/three`. dirKey stays a pure function of the path.
+    const d = repo + "\0" + dirKey(f.path);
+    if (!byDir.has(d)) {
+      byDir.set(d, []);
+      ndOf.set(repo, (ndOf.get(repo) || 0) + 1);
+    }
     byDir.get(d).push(f);
   }
   const dirs = [...byDir.keys()].sort();
@@ -65,20 +89,55 @@ export function planCity(files) {
     sizeOf.set(d, s);
     maxSize = Math.max(maxSize, s);
   }
-  const block = maxSize;          // cell pitch: the largest district defines it
+  // quantized, not exact: only the global pitch snaps to a step, each district
+  // keeps its own sizeOf, so the slack is the lawn strip already paved round
+  // `inner`.
+  const block = blockStep(maxSize);
   const stride = block + GUT;
 
-  const dcols = Math.max(1, Math.ceil(Math.sqrt(nd)));
-  const drows = Math.max(1, Math.ceil(nd / dcols));
+  // each repo owns a rectangle of cells; the meta-grid lays those rectangles
+  // out with a belt between them. sorted, not selection-ordered, so the same
+  // four repos always produce the same city.
+  const names = [...ndOf.keys()].sort();
+  const mcols = Math.max(1, Math.ceil(Math.sqrt(names.length)));
+  const mrows = Math.max(1, Math.ceil(names.length / mcols));
+  const rects = names.map((name, i) => {
+    const n = ndOf.get(name);
+    const cols = Math.max(1, Math.ceil(Math.sqrt(n)));
+    return { name, cols, rows: Math.max(1, Math.ceil(n / cols)), mc: i % mcols, mr: Math.floor(i / mcols) };
+  });
+  // a meta-column is as wide as its widest repo, a meta-row as tall as its
+  // tallest. the 1s are the empty-repo-list case, where the grid is one cell.
+  const colW = new Array(mcols).fill(1), rowH = new Array(mrows).fill(1);
+  for (const r of rects) {
+    colW[r.mc] = Math.max(colW[r.mc], r.cols);
+    rowH[r.mr] = Math.max(rowH[r.mr], r.rows);
+  }
+  const scan = (a) => { let s = 0; return a.map(v => { const at = s; s += v + BELT; return at; }); };
+  const colX = scan(colW), rowY = scan(rowH);
+  const dcols = colW.reduce((a, b) => a + b, 0) + BELT * (mcols - 1);
+  const drows = rowH.reduce((a, b) => a + b, 0) + BELT * (mrows - 1);
   const cells = dcols * drows;
+
+  // ponytail: a repo gaining a *district* can widen its meta-column and shift
+  // every neighbour sideways — blockStep only quantizes the pitch, not the
+  // rectangle. quantize rcols/rrows the same way if a real four-repo city is
+  // seen to slide when a new directory appears.
+  const repos = rects.map(r => ({ name: r.name, cx: colX[r.mc], cy: rowY[r.mr], cols: r.cols, rows: r.rows }));
+  const repoAt = new Map(repos.map(r => [r.name, r]));
+  const cellOf = (r, i) => (r.cy + Math.floor(i / r.cols)) * dcols + r.cx + (i % r.cols);
 
   const takenCell = new Set();
   const dcell = new Map();
   for (const d of dirs) {
-    let i = hash(d) % cells;
-    while (takenCell.has(i)) i = (i + 1) % cells;
-    takenCell.add(i);
-    dcell.set(d, i);
+    const r = repoAt.get(d.slice(0, d.indexOf("\0")));
+    const slots = r.cols * r.rows;
+    // probe inside the repo's own rectangle. probing the global grid would let
+    // a full repo spill its districts into the neighbour's neighbourhood.
+    let i = hash(d) % slots;
+    while (takenCell.has(cellOf(r, i))) i = (i + 1) % slots;
+    takenCell.add(cellOf(r, i));
+    dcell.set(d, cellOf(r, i));
   }
 
   const pos = new Map();
@@ -98,17 +157,25 @@ export function planCity(files) {
     // middle of the asphalt, which reads as a city built on top of the road.
     // `inner` is the padded rectangle the buildings actually occupy — the
     // renderer paves that and lays the rest of the cell to lawn.
-    blocks.push({ bx: cx, by: cy, size: block, inner: { bx, by, size }, dir: d, park: false });
+    // `dir` stays the bare directory — it is the sign text, and two repos both
+    // signing a district `src` is the correct picture.
+    const cut = d.indexOf("\0");
+    blocks.push({ bx: cx, by: cy, size: block, inner: { bx, by, size }, dir: d.slice(cut + 1), repo: d.slice(0, cut), park: false });
     const slots = size * size;
     const taken = new Set();
     // sorted so probe order does not depend on scan order
     const arr = byDir.get(d).slice().sort((a, b) => (a.path < b.path ? -1 : 1));
     for (const f of arr) {
+      // ponytail: the plot seed is the bare basename, not the composite key the
+      // design names for building identity. within one district every file
+      // shares a repo, so the prefix would only shift the whole probe sequence
+      // — and districts are already per-repo, so two `index.js` cannot collide.
+      // switch to `f.key` if plots ever need to survive a repo rename.
       const base = f.path.split("/").pop();
       let j = hash(base) % slots;
       while (taken.has(j)) j = (j + 1) % slots;
       taken.add(j);
-      pos.set(f.path, { gx: bx + (j % size), gy: by + Math.floor(j / size) });
+      pos.set(f.key ?? f.path, { gx: bx + (j % size), gy: by + Math.floor(j / size) });
     }
     for (let j = 0; j < slots; j++) {
       if (!taken.has(j)) empty.push({ gx: bx + (j % size), gy: by + Math.floor(j / size), park: false });
@@ -137,7 +204,7 @@ export function planCity(files) {
   }
 
   return {
-    block, dcols, drows,
+    block, dcols, drows, repos,
     gw: dcols * stride - GUT,
     gh: drows * stride - GUT,
     districts: nd,

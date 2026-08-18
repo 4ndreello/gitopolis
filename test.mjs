@@ -2,7 +2,7 @@
 // run: node test.mjs
 import assert from "node:assert/strict";
 import { cheat, mergeWeather, mountCheat } from "./src/cheat.js";
-import { fitDistance, fillFor, frameFraction, dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus, fmtBytes } from "./src/city.js";
+import { fitDistance, fillFor, frameFraction, dirKey, floorsOf, planCity, blockStep, BLOCK_STEPS, BELT, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus, fmtBytes } from "./src/city.js";
 
 // --- fmtBytes stays three characters wide across the unit boundaries ---
 assert.equal(fmtBytes(0), "0");
@@ -86,6 +86,107 @@ const REPO = [
   const plan = planCity(mk(REPO));
   assert.equal(plan.blocks.length, plan.dcols * plan.drows, "every grid cell must be a block or a park");
   assert.ok(plan.blocks.some(b => b.park) || plan.districts === plan.dcols * plan.drows);
+}
+
+// --- the cell pitch is quantized, so one district crossing a threshold does
+// not slide the whole city (and, with four repos, three neighbourhoods you are
+// not even looking at) ---
+{
+  let last = 0;
+  for (let n = 0; n <= 200; n++) {
+    const s = blockStep(n);
+    assert.ok(s >= Math.max(2, n), `blockStep(${n}) = ${s} must still hold a district of ${n}`);
+    assert.ok(s >= last, "blockStep must never dip as the city grows");
+    assert.equal(blockStep(s), s, `blockStep(${s}) is not idempotent — the pitch would drift on replan`);
+    last = s;
+  }
+  // the design doc says "6 and 7 land on the same step", but its own
+  // BLOCK_STEPS holds both 6 and 8, so that pair cannot collapse. the table is
+  // given verbatim in the spec and wins; these are the collapses it does make.
+  assert.equal(blockStep(5), blockStep(6), "a district growing past a step boundary keeps the pitch");
+  assert.equal(blockStep(7), blockStep(8));
+  assert.equal(blockStep(1), BLOCK_STEPS[0], "below the table, the smallest step");
+  assert.equal(blockStep(49), 64, "above the table, round up to a multiple of 16");
+}
+
+// --- multi-repo: each repo is a contiguous rectangle, belts are parks ---
+const mkr = (repo, paths) => paths.map(p => ({ repo, key: `${repo}\0${p}`, path: p, bytes: 2000 }));
+const BRAVO = [
+  "readme.md",
+  "lib/x.ts", "lib/y.ts",
+  "web/app/page.tsx", "web/app/layout.tsx",
+  "infra/main.tf",
+];
+{
+  const plan = planCity([...mkr("alpha", REPO), ...mkr("bravo", BRAVO), ...mkr("charlie", ["one.txt"]), ...mkr("delta", ["x/a.ts", "y/b.ts"])]);
+  assert.deepEqual(plan.repos.map(r => r.name), ["alpha", "bravo", "charlie", "delta"],
+    "repos are sorted, not selection-ordered, so the same four always make the same city");
+
+  // no two neighbourhoods share a cell
+  for (const a of plan.repos) {
+    for (const b of plan.repos) {
+      if (a === b) continue;
+      const apart = a.cx + a.cols <= b.cx || b.cx + b.cols <= a.cx || a.cy + a.rows <= b.cy || b.cy + b.rows <= a.cy;
+      assert.ok(apart, `${a.name} and ${b.name} overlap`);
+    }
+  }
+
+  // every district lands inside its own repo's rectangle: probing must not
+  // escape into the neighbour's neighbourhood
+  const stride = plan.block + GUT;
+  const at = new Map();
+  for (const b of plan.blocks) at.set(`${Math.round(b.bx / stride)},${Math.round(b.by / stride)}`, b);
+  const byName = new Map(plan.repos.map(r => [r.name, r]));
+  for (const b of plan.blocks) {
+    if (b.park) continue;
+    const r = byName.get(b.repo);
+    const c = Math.round(b.bx / stride), rw = Math.round(b.by / stride);
+    assert.ok(c >= r.cx && c < r.cx + r.cols && rw >= r.cy && rw < r.cy + r.rows,
+      `district ${b.repo}/${b.dir} sits at ${c},${rw}, outside its repo rectangle`);
+  }
+
+  // a belt column (or row) is one no repo covers. every cell of it is a park,
+  // through the leftover-cell path that already existed — no new branch.
+  const cov = (lo, n, xs) => { for (let i = lo; i < lo + n; i++) xs.add(i); return xs; };
+  const cols = new Set(), rows = new Set();
+  for (const r of plan.repos) { cov(r.cx, r.cols, cols); cov(r.cy, r.rows, rows); }
+  let belts = 0;
+  for (let c = 0; c < plan.dcols; c++) {
+    for (let r = 0; r < plan.drows; r++) {
+      if (cols.has(c) && rows.has(r)) continue;
+      const b = at.get(`${c},${r}`);
+      assert.ok(b, `belt cell ${c},${r} is a hole in the asphalt, not a block`);
+      assert.ok(b.park, `belt cell ${c},${r} was built on`);
+      belts++;
+    }
+  }
+  assert.ok(belts > 0, "four repos on a 2x2 meta-grid must have a belt between them");
+  assert.equal(plan.blocks.length, plan.dcols * plan.drows, "every grid cell is still a block or a park");
+  assert.equal(BELT, 1);
+}
+
+// --- cross-repo stability: growing repo A must not move a building in repo B ---
+// the multi-repo form of the sibling invariant. the file added takes `big` from
+// 25 files to 26, which is exactly the district-size threshold (5 -> 6) that
+// used to change the global pitch and slide every coordinate in the city.
+{
+  const big = Array.from({ length: 25 }, (_, i) => `big/g${i}.ts`);
+  const B = mkr("bravo", BRAVO);
+  const before = planCity([...mkr("alpha", ["a.txt", ...big]), ...B]);
+  const after = planCity([...mkr("alpha", ["a.txt", ...big, "big/g25.ts"]), ...B]);
+  assert.equal(after.block, before.block, "the quantized pitch must survive a district crossing sqrt(25)");
+  for (const f of B) {
+    assert.deepEqual(before.pos.get(f.key), after.pos.get(f.key), `${f.key} moved when another repo grew`);
+  }
+}
+
+// --- a repo with no name is still a city: the single-repo call is unchanged ---
+{
+  const plan = planCity(mk(REPO));
+  assert.equal(plan.repos.length, 1, "no repo field means one unnamed repo");
+  assert.deepEqual(plan.repos[0], { name: "", cx: 0, cy: 0, cols: plan.dcols, rows: plan.drows },
+    "and its rectangle is the whole grid, with no belt");
+  assert.ok(plan.pos.get("src/App.tsx"), "files with no key are still keyed by path");
 }
 
 // --- the in-game clock wraps and never lies about the hour ---

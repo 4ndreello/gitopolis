@@ -83,9 +83,14 @@ single-repo call in `test.mjs` keeps working unchanged.
 ### The reflow ceiling gets worse, so quantize the pitch
 
 `block` — the cell pitch — is `max(ceil(sqrt(district size)))` across the whole
-city. It is continuous, so a district growing from 6 files to 7 changes the
-pitch and slides every coordinate in the city. CLAUDE.md records this as a known
-ceiling: invisible during normal editing, visible on a branch switch.
+city. It is continuous, so the widest district crossing a perfect square — 9
+files to 10, say — changes the pitch and slides every coordinate in the city.
+CLAUDE.md records this as a known ceiling: invisible during normal editing,
+visible on a branch switch.
+
+(CLAUDE.md's own example, "6 files to 7", is not actually a threshold:
+`ceil(sqrt(6))` and `ceil(sqrt(7))` are both 3. The ceiling is real, the example
+was wrong.)
 
 With four repos it stops being invisible. A district crossing a threshold in
 repo A teleports every building in B, C and D — a repo you are not even looking
@@ -235,7 +240,10 @@ node with no DOM.
 
 - A district of repo A never lands in repo B's rectangle.
 - Every belt cell is a park.
-- `blockStep` is monotone and idempotent, and 6 and 7 land on the same step.
+- `blockStep` is monotone and idempotent, and collapses the pairs the table
+  actually collapses (5 and 6; 7 and 8). Note the table contains both 6 and 8,
+  so `blockStep(6)` and `blockStep(7)` do *not* collapse — an earlier draft of
+  this spec asserted they did, which contradicted its own table.
 - **Cross-repo stability:** adding a file to repo A moves no building in repo B.
   This is the multi-repo form of the invariant `test.mjs` already guards — if a
   change makes it fail, the change is wrong, not the test.
