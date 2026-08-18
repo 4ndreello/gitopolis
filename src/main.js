@@ -24,6 +24,7 @@ let layoutDirty = true;
 
 function ingest(snapshot) {
   const seen = new Set();
+  const done = [];   // cranes coming down this snapshot: one confetti burst each
   for (const inc of snapshot.files) {
     seen.add(inc.path);
     const cur = files.get(inc.path);
@@ -44,7 +45,10 @@ function ingest(snapshot) {
     }
     // the scaffolding coming off is the whole point of a commit: every dirty
     // file flips at once, which is what pulls the frame back out over the city
-    if (cur.dirty !== inc.dirty) cur.attn = 1;
+    if (cur.dirty !== inc.dirty) {
+      cur.attn = 1;
+      if (cur.dirty) done.push(cur);
+    }
     cur.dirty = inc.dirty;
   }
   for (const [path, f] of files) {
@@ -52,6 +56,16 @@ function ingest(snapshot) {
       f.dying = 0.001;
       const w = fileWorld(f);
       ghosts.push({ x: w.x, z: w.z, w: 1 });
+    }
+  }
+  // one particle budget split across the whole commit: 40 files each asking for
+  // a full burst would empty the pool on the first few roofs and leave the rest
+  // of the city celebrating in silence
+  if (done.length) {
+    const n = Math.max(4, Math.min(14, Math.round(DUST_MAX * 0.6 / done.length)));
+    for (const f of done) {
+      const w = fileWorld(f);
+      spawnSparks(w.x, w.y + 0.3, w.z, n);
     }
   }
   if (snapshot.repo && el.repo.value !== snapshot.repo) el.repo.value = snapshot.repo;
@@ -970,20 +984,41 @@ for (let i = 0; i < 8; i++) {
 const DUST_MAX = 900;
 const dustPos = new Float32Array(DUST_MAX * 3);
 const dust = [];
+const dustCol = new Float32Array(DUST_MAX * 3);
 const dustGeo = new THREE.BufferGeometry();
 dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
+// the confetti shares this system rather than adding a second one: same buffer,
+// same loop, same draw call — a spark is only a grain of dust thrown harder and
+// painted warm, which is what the per-vertex colour is for
+dustGeo.setAttribute("color", new THREE.BufferAttribute(dustCol, 3));
 const dustPoints = new THREE.Points(dustGeo, new THREE.PointsMaterial({
-  size: 0.3, color: 0xcfc7b8, transparent: true, opacity: 0.5, depthWrite: false,
+  size: 0.3, vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false,
 }));
 dustPoints.frustumCulled = false;
 scene.add(dustPoints);
+
+const DUST_RGB = [0.81, 0.78, 0.72];
+const SPARK_RGB = [[1, 0.82, 0.48], [1, 0.95, 0.82], [1, 0.60, 0.24]];  // ouro, branco quente, laranja
 
 function spawnDust(x, y, z, n, spread) {
   for (let i = 0; i < n && dust.length < DUST_MAX; i++) {
     dust.push({
       x: x + (Math.random() - 0.5) * spread, y: y + Math.random() * 0.3, z: z + (Math.random() - 0.5) * spread,
       vx: (Math.random() - 0.5) * 0.9, vy: 0.5 + Math.random() * 1.1, vz: (Math.random() - 0.5) * 0.9,
-      life: 1,
+      life: 1, c: DUST_RGB,
+    });
+  }
+}
+
+// the ribbon cutting: a file leaving the dirty set drops its crane, and the
+// roof throws confetti. thrown ~3x harder than dust so the existing gravity
+// arcs it over the roofline instead of letting it puff sideways.
+function spawnSparks(x, y, z, n) {
+  for (let i = 0; i < n && dust.length < DUST_MAX; i++) {
+    dust.push({
+      x: x + (Math.random() - 0.5) * 0.8, y: y + 0.2, z: z + (Math.random() - 0.5) * 0.8,
+      vx: (Math.random() - 0.5) * 1.6, vy: 2.2 + Math.random() * 1.2, vz: (Math.random() - 0.5) * 1.6,
+      life: 1, c: SPARK_RGB[(Math.random() * SPARK_RGB.length) | 0],
     });
   }
 }
@@ -1323,10 +1358,12 @@ function tick(ts) {
   }
   for (const p of dust) {
     dustPos[n * 3] = p.x; dustPos[n * 3 + 1] = p.y; dustPos[n * 3 + 2] = p.z;
+    dustCol[n * 3] = p.c[0]; dustCol[n * 3 + 1] = p.c[1]; dustCol[n * 3 + 2] = p.c[2];
     n++;
   }
   dustGeo.setDrawRange(0, n);
   dustGeo.attributes.position.needsUpdate = true;
+  dustGeo.attributes.color.needsUpdate = true;
 
   for (const s of flashPool) {
     if (s.life > 0) {

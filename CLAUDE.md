@@ -137,6 +137,19 @@ that used to fire on every `layoutDirty`. The flip side is that the layout reflo
 ceiling above is now visible: a branch switch slides the city under a moving
 camera instead of hiding it behind a cut.
 
+### The confetti is the dust system
+
+A file leaving the dirty set drops its crane and throws confetti off the roof
+(`spawnSparks`). It is not a second particle system: `dustGeo` carries a `color`
+attribute and the material runs `vertexColors`, so a spark is a grain of dust
+with a warm colour and ~3x the upward velocity — same buffer, same loop, same
+draw call, and the existing gravity does the arc.
+
+`DUST_MAX` is a global pool, so the per-roof burst size is divided by how many
+files flipped in the same snapshot. Without that split, a 40-file commit spends
+the whole pool on the first few roofs and the rest of the city celebrates in
+silence. New files are born dirty and never flip, so the cold open stays quiet.
+
 ### src/props.js: procedural props
 
 Vehicles, lamp posts, bus stops, bins, hydrants and sign posts are each **one merged
