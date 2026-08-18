@@ -4,7 +4,7 @@ import {
   GUT, FLOOR_H, MAX_FLOORS,
   hash, rand01, dirKey, extOf, floorsOf, isHouse, planCity,
   dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt,
-  roadLines, intersections, nightK,
+  roadLines, intersections, nightK, focus,
 } from "./city.js";
 import {
   TEX_GLOW, GEO_CAR, GEO_VAN, GEO_TRUCK, GEO_LAMP, GEO_BUSSTOP, GEO_BIN,
@@ -15,7 +15,10 @@ import {
 // state: one entry per file on disk. animation fields live here and
 // nowhere else — the city itself is never persisted.
 // ============================================================
-const files = new Map(); // path -> { path, bytes, target, dirty, grown, dying, flash }
+const files = new Map(); // path -> { path, bytes, target, dirty, grown, dying, flash, attn }
+// a deleted file is gone from the map long before the camera finishes
+// travelling to it, so its plot outlives it here as a fading pull
+const ghosts = [];       // { x, z, w }
 let layout = planCity([]);
 let layoutDirty = true;
 
@@ -28,20 +31,28 @@ function ingest(snapshot) {
       // brand new: rises from nothing, scaffolding first
       files.set(inc.path, {
         path: inc.path, bytes: Math.max(96, inc.bytes), target: inc.bytes,
-        dirty: inc.dirty, grown: 0, dying: 0, flash: 0,
+        dirty: inc.dirty, grown: 0, dying: 0, flash: 0, attn: 1,
       });
       layoutDirty = true;
       continue;
     }
-    if (cur.dying) { cur.dying = 0; cur.grown = Math.max(0.05, cur.grown); }
+    if (cur.dying) { cur.dying = 0; cur.grown = Math.max(0.05, cur.grown); cur.attn = 1; }
     if (Math.abs(cur.target - inc.bytes) > 0) {
       if (floorsOf(cur.target) !== floorsOf(inc.bytes)) cur.flash = 1;
       cur.target = inc.bytes;
+      cur.attn = 1;
     }
+    // the scaffolding coming off is the whole point of a commit: every dirty
+    // file flips at once, which is what pulls the frame back out over the city
+    if (cur.dirty !== inc.dirty) cur.attn = 1;
     cur.dirty = inc.dirty;
   }
   for (const [path, f] of files) {
-    if (!seen.has(path) && !f.dying) f.dying = 0.001;
+    if (!seen.has(path) && !f.dying) {
+      f.dying = 0.001;
+      const w = fileWorld(f);
+      ghosts.push({ x: w.x, z: w.z, w: 1 });
+    }
   }
   if (snapshot.repo && el.repo.value !== snapshot.repo) el.repo.value = snapshot.repo;
   el.branch.textContent = snapshot.branch || "?";
@@ -1030,21 +1041,88 @@ const CAM_ANGLE = 52;        // degrees above the horizon; drag the scene to cha
 let fogFar = 200;            // clear-sky baseline, captured below and scaled by weather
 let frozenT = null;          // set by window.__time() to hold a fixed hour
 
+// the whole-city framing. the camera only snaps to it once, on the first real
+// layout: after that driveCamera eases towards it, so a file disappearing no
+// longer teleports the view.
+const homeTarget = new THREE.Vector3(0, 1, 0);
+let homeDist = 40;
+let framed = false;
+
+function distFor(radius) {
+  return radius / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 0.62;
+}
+
+// fog rides the eased distance so a close-up does not put the far side of the
+// city behind fog.near. it floors at the home framing because fogFar is the
+// clear-sky baseline applyTime scales by weather — writing scene.fog.far here
+// instead would drop the rain multiplier on the floor.
+function applyFog(dist) {
+  scene.fog.near = dist * 0.95;
+  fogFar = Math.max(dist, homeDist) * 4.2;
+}
+
 function frameCamera() {
   const r = Math.max(layout.gw, layout.gh) * 0.72 + 6;
-  controls.target.set(0, Math.min(6, r * 0.1), 0);
+  homeTarget.set(0, Math.min(6, r * 0.1), 0);
+  homeDist = distFor(r);
+  // the module-scope call happens before the first snapshot, on planCity([]) —
+  // snapping there would frame an empty world and burn the one-shot
+  if (framed || !layout.districts) return;
+  framed = true;
   const polar = THREE.MathUtils.degToRad(90 - CAM_ANGLE);
-  const dist = r / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 0.62;
-  const az = Math.atan2(camera.position.x - controls.target.x, camera.position.z - controls.target.z) || 0.7;
+  const az = Math.atan2(camera.position.x - homeTarget.x, camera.position.z - homeTarget.z) || 0.7;
+  controls.target.copy(homeTarget);
   camera.position.set(
-    controls.target.x + Math.sin(az) * dist * Math.sin(polar),
-    controls.target.y + dist * Math.cos(polar),
-    controls.target.z + Math.cos(az) * dist * Math.sin(polar)
+    homeTarget.x + Math.sin(az) * homeDist * Math.sin(polar),
+    homeTarget.y + homeDist * Math.cos(polar),
+    homeTarget.z + Math.cos(az) * homeDist * Math.sin(polar)
   );
   controls.update();
-  scene.fog.near = dist * 0.95;
-  fogFar = dist * 4.2;
+  applyFog(homeDist);
   scene.fog.far = fogFar;
+}
+
+// ---- attention camera ----
+// every change marks its building with attn 1; the frame drifts to the
+// weighted centre of whatever is still lit and pulls back out as they fade.
+// one save is a close-up, a commit is the whole city, and going home is just
+// the radius growing — there is no "return" state.
+const ATTN_DECAY = 0.35;     // ~3s of pull per event
+const FOCUS_MARGIN = 6;      // same slack frameCamera leaves around the city
+const _want = new THREE.Vector3();
+const _off = new THREE.Vector3();
+const _pts = [];
+
+function driveCamera(dt) {
+  // autoRotate is the "nobody has touched the camera for 6s" flag — idleTimer
+  // is 0 *during* a drag as well as when idle, so gating on it would fight the
+  // pointer. while the user is driving, the director stays out of the way.
+  if (!controls.autoRotate) return;
+  _pts.length = 0;
+  for (const f of files.values()) {
+    if (f.attn <= 0) continue;
+    const w = fileWorld(f);
+    _pts.push({ x: w.x, z: w.z, w: f.attn });
+  }
+  for (const g of ghosts) _pts.push(g);
+
+  const f = focus(_pts);
+  // never closer than a third of the home framing and never wider than home:
+  // city units scale with sqrt(file count), so an absolute floor would be a
+  // dive in a big repo and no movement at all in a small one
+  const dist = f
+    ? THREE.MathUtils.clamp(distFor(f.r + FOCUS_MARGIN), homeDist * 0.35, homeDist)
+    : homeDist;
+  _want.set(f ? f.x : homeTarget.x, homeTarget.y, f ? f.z : homeTarget.z);
+  // 1 - exp(-dt*k) instead of a fixed alpha: same easing at 30 and at 144 fps
+  controls.target.lerp(_want, 1 - Math.exp(-dt * 1.1));
+  // only the distance to the target moves, never the angles, so autoRotate
+  // keeps turning through the whole trip and CAM_ANGLE's measured pitch (the
+  // moon arc depends on it) is left alone
+  _off.copy(camera.position).sub(controls.target);
+  _off.setLength(THREE.MathUtils.lerp(_off.length(), dist, 1 - Math.exp(-dt * 0.9)));
+  camera.position.copy(controls.target).add(_off);
+  applyFog(_off.length());
 }
 
 // ============================================================
@@ -1201,6 +1279,7 @@ function tick(ts) {
       spawnDust(w.x, 0.2, w.z, 6, 1.1);
     }
     f.flash = Math.max(0, f.flash - dt * 1.5);
+    f.attn = Math.max(0, f.attn - dt * ATTN_DECAY);
     if (f.flash > 0.95) {
       const w = fileWorld(f);
       fireFlash(w.x, w.y * 0.7 + 0.5, w.z);
@@ -1285,10 +1364,16 @@ function tick(ts) {
   updateRain(dt, weather.rain);
   for (const m of cloudMats) m.color.copy(CLOUD_CLEAR).lerp(CLOUD_OVERCAST, weather.overcast);
 
+  for (let i = ghosts.length - 1; i >= 0; i--) {
+    ghosts[i].w -= dt * ATTN_DECAY;
+    if (ghosts[i].w <= 0) ghosts.splice(i, 1);
+  }
+
   if (idleTimer > 0) {
     idleTimer += dt;
     if (idleTimer > 6) { controls.autoRotate = true; idleTimer = 0; }
   }
+  driveCamera(dt);
   controls.update();
   renderer.render(scene, camera);
 
@@ -1316,6 +1401,9 @@ window.__city = () => ({
   cars: traffic.reduce((n, t) => n + t.mesh.count, 0),
   lamps: pools ? pools.count : 0,
   signs: signCount,
+  attn: [...files.values()].filter(f => f.attn > 0).length + ghosts.length,
+  camDist: +camera.position.distanceTo(controls.target).toFixed(1),
+  homeDist: +homeDist.toFixed(1),
   night: +nightK(frozenT ?? dayT(Date.now())).toFixed(2),
   peds: peds ? peds.count : 0,
   fps,

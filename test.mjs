@@ -1,7 +1,7 @@
 // smallest thing that fails if the derivation breaks.
 // run: node test.mjs
 import assert from "node:assert/strict";
-import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT } from "./src/city.js";
+import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus } from "./src/city.js";
 
 // --- dirKey drops the basename before truncating ---
 assert.equal(dirKey("src/main.tsx"), "src", "a file directly in src belongs to src, not to its own district");
@@ -181,3 +181,27 @@ for (let i = 0; i <= 96; i++) {
 }
 
 console.log("ok — all city derivation checks passed");
+
+// --- focus: the camera's aim point, weighted by attention ---
+assert.equal(focus([]), null, "nothing changed means no opinion about where to look");
+{
+  const one = focus([{ x: 3, z: -4, w: 1 }]);
+  assert.deepEqual(one, { x: 3, z: -4, r: 0 }, "a single change is framed dead on, with no spread");
+  const two = focus([{ x: -10, z: 0, w: 1 }, { x: 10, z: 0, w: 1 }]);
+  assert.equal(two.x, 0);
+  assert.equal(two.r, 10, "two changes of equal weight sit half the span apart");
+}
+// the radius is weighted, not thresholded: fading attention has to shrink the
+// frame continuously, or every focus ends with a dive at the city as the last
+// buildings drop out of the radius together
+{
+  const faint = focus([{ x: 0, z: 0, w: 0.1 }, { x: 20, z: 0, w: 0.1 }]);
+  assert.equal(faint.x, 10, "faint points still count toward the centre");
+  assert.equal(faint.r, 1, "and hold the frame open only in proportion to their weight");
+  let last = Infinity;
+  for (let w = 1; w > 0; w -= 0.05) {
+    const r = focus([{ x: 0, z: 0, w: 1 }, { x: 20, z: 0, w }]).r;
+    assert.ok(r <= last + 1e-9, "radius must never jump as attention decays");
+    last = r;
+  }
+}

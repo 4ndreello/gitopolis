@@ -107,6 +107,36 @@ across every road. It is now ~1.2, which overhangs the kerb and stops there. Bod
 scaffolding never leave the paving; if that ever looks wrong, measure before changing the
 layout.
 
+### The camera aims itself
+
+`driveCamera` in `main.js` eases `controls.target` and the camera→target distance
+towards `focus()` (`city.js`), the attention-weighted centre of everything that
+just changed. Every diff in `ingest()` stamps `attn = 1` on its file; `attn` decays
+at 0.35/s, so one save is a close-up and a commit — where every `dirty` flag flips
+at once — pulls the frame back out over the whole city. Going home is not a state:
+it is the focus radius growing until it matches `homeDist`.
+
+Three things here are not free choices:
+
+- The gate is `controls.autoRotate`, **not** `idleTimer === 0`. `idleTimer` is 0
+  *during* a drag as well as when idle, so gating on it makes the camera fight the
+  pointer. `autoRotate` is the real "nobody has touched this for 6s" flag.
+- The radius is weighted (`hypot * w`), never thresholded. A commit stamps every
+  file in the same frame, so any cutoff drops them all together and the frame
+  collapses to the minimum distance for a fifth of a second before pulling out.
+- Only the distance moves; the polar angle is left alone. `CAM_ANGLE` carries a
+  measured contract (the moon arc rides just under the top edge at that pitch).
+
+Deleted files pull through a separate `ghosts` array, because `dying` removes the
+entry from `files` after 0.67s while the attention lasts ~2.9s — following an
+entry that no longer exists makes the centroid jump mid-travel.
+
+`frameCamera` no longer moves the camera except once, on the first non-empty
+layout; it only records `homeTarget` / `homeDist`. That also removes the teleport
+that used to fire on every `layoutDirty`. The flip side is that the layout reflow
+ceiling above is now visible: a branch switch slides the city under a moving
+camera instead of hiding it behind a cut.
+
 ### src/props.js: procedural props
 
 Vehicles, lamp posts, bus stops, bins, hydrants and sign posts are each **one merged

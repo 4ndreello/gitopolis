@@ -231,3 +231,18 @@ export function weatherAt(day) {
   const overcast = rand01(day * 1.7);
   return { overcast, rain: overcast > 0.72 ? (overcast - 0.72) / 0.28 : 0 };
 }
+
+// where the camera should look: the weighted centre of everything that just
+// changed, plus how far that crowd spreads. the weight is the caller's decaying
+// attention, and it scales the radius too — a building whose moment has passed
+// stops holding the frame open instead of dropping out of the radius all at
+// once, which is what makes the pull-out smooth rather than a dive.
+export function focus(pts) {
+  let W = 0, cx = 0, cz = 0;
+  for (const p of pts) { W += p.w; cx += p.x * p.w; cz += p.z * p.w; }
+  if (!W) return null;
+  cx /= W; cz /= W;
+  let r = 0;
+  for (const p of pts) r = Math.max(r, Math.hypot(p.x - cx, p.z - cz) * p.w);
+  return { x: cx, z: cz, r };
+}
