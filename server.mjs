@@ -141,6 +141,19 @@ function startWatch(st) {
       if (p.startsWith(".git/") || p === ".git" || p.includes("node_modules/")) return;
       schedule(st, 140);
     });
+    // the try/catch above only covers the synchronous open. a watcher that
+    // loses access to its tree afterwards — `chmod 000 .git` on a live repo is
+    // enough — reports it as an async 'error' event, and an unhandled one takes
+    // the whole process down. that was survivable when the process watched one
+    // repo: it died with the only city on screen. now it would drop three
+    // healthy neighbourhoods because a fourth changed permissions.
+    // the 700ms poll covers this repo alone from here, and `watching: false`
+    // is already on the wire, so the hud says the latency floor tripled.
+    st.watcher.on("error", (err) => {
+      console.warn(`watch on ${st.repo.name} failed, polling only:`, err.message);
+      try { st.watcher.close(); } catch {}
+      st.watcher = null;
+    });
   } catch (err) {
     console.warn("recursive watch unavailable, polling only:", err.message);
   }
