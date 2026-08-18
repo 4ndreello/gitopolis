@@ -25,6 +25,7 @@ let layoutDirty = true;
 function ingest(snapshot) {
   const seen = new Set();
   const done = [];   // cranes coming down this snapshot: one confetti burst each
+  const gone = [];   // files deleted this snapshot: one smoke column each
   for (const inc of snapshot.files) {
     seen.add(inc.path);
     const cur = files.get(inc.path);
@@ -47,7 +48,9 @@ function ingest(snapshot) {
     // file flips at once, which is what pulls the frame back out over the city
     if (cur.dirty !== inc.dirty) {
       cur.attn = 1;
+      const w = fileWorld(cur);
       if (cur.dirty) done.push(cur);
+      else fx("dirty", w.x, 0.2, w.z);   // work starting had no effect at all before
     }
     cur.dirty = inc.dirty;
   }
@@ -56,17 +59,25 @@ function ingest(snapshot) {
       f.dying = 0.001;
       const w = fileWorld(f);
       ghosts.push({ x: w.x, z: w.z, w: 1 });
+      gone.push(w);
     }
   }
   // one particle budget split across the whole commit: 40 files each asking for
   // a full burst would empty the pool on the first few roofs and leave the rest
   // of the city celebrating in silence
   if (done.length) {
-    const n = Math.max(4, Math.min(14, Math.round(DUST_MAX * 0.6 / done.length)));
+    const n = Math.max(4, Math.min(FX.done.n, Math.round(DUST_MAX * 0.6 / done.length)));
     for (const f of done) {
       const w = fileWorld(f);
-      spawnSparks(w.x, w.y + 0.3, w.z, n);
+      fx("done", w.x, w.y + 0.3, w.z, n);
     }
+  }
+  // deletions land in the same snapshot too, so the smoke splits the pool the
+  // same way. it lives here rather than in the dying branch of the loop because
+  // only ingest knows how many are going at once
+  if (gone.length) {
+    const n = Math.max(5, Math.min(FX.died.n, Math.round(DUST_MAX * 0.5 / gone.length)));
+    for (const w of gone) fx("died", w.x, w.y * 0.5 + 0.3, w.z, n);
   }
   if (snapshot.repo && el.repo.value !== snapshot.repo) el.repo.value = snapshot.repo;
   el.branch.textContent = snapshot.branch || "?";
@@ -985,6 +996,8 @@ const DUST_MAX = 900;
 const dustPos = new Float32Array(DUST_MAX * 3);
 const dust = [];
 const dustCol = new Float32Array(DUST_MAX * 3);
+const smokePos = new Float32Array(DUST_MAX * 3);
+const smokeCol = new Float32Array(DUST_MAX * 3);
 const dustGeo = new THREE.BufferGeometry();
 dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
 // the confetti shares this system rather than adding a second one: same buffer,
@@ -992,33 +1005,59 @@ dustGeo.setAttribute("position", new THREE.BufferAttribute(dustPos, 3));
 // painted warm, which is what the per-vertex colour is for
 dustGeo.setAttribute("color", new THREE.BufferAttribute(dustCol, 3));
 const dustPoints = new THREE.Points(dustGeo, new THREE.PointsMaterial({
-  size: 0.3, vertexColors: true, transparent: true, opacity: 0.5, depthWrite: false,
+  // 0.3 / 0.5 was fine when dust was one anonymous beige puff. six events that
+  // have to be told apart at city framing need to out-read the rain, which is a
+  // field of specks at exactly this size
+  size: 0.45, vertexColors: true, transparent: true, opacity: 0.62, depthWrite: false,
+}));
+// smoke is the same particle in a second, fatter, fainter layer. one array, one
+// update loop, two draw calls — a grain at size 0.3 reads as a gnat swarm no
+// matter how dark you paint it, and demolition has to look like demolition.
+const smokeGeo = new THREE.BufferGeometry();
+smokeGeo.setAttribute("position", new THREE.BufferAttribute(smokePos, 3));
+smokeGeo.setAttribute("color", new THREE.BufferAttribute(smokeCol, 3));
+const smokePoints = new THREE.Points(smokeGeo, new THREE.PointsMaterial({
+  size: 1.1, vertexColors: true, transparent: true, opacity: 0.28, depthWrite: false,
 }));
 dustPoints.frustumCulled = false;
-scene.add(dustPoints);
+smokePoints.frustumCulled = false;
+scene.add(dustPoints, smokePoints);
 
-const DUST_RGB = [0.81, 0.78, 0.72];
-const SPARK_RGB = [[1, 0.82, 0.48], [1, 0.95, 0.82], [1, 0.60, 0.24]];  // ouro, branco quente, laranja
+// ---- the vocabulary ----
+// six things can happen to a file, and every one of them used to be the same
+// beige puff with a different particle count. the city could say that something
+// happened but never what. each preset is colour + launch + physics; nothing
+// here is logic, so tuning one event cannot break another.
+//   spread/up: metres. g: gravity multiplier. d: drag per second.
+//   r: life drained per second (1 / seconds visible). k: 1 puts it in the smoke layer.
+const FX = {
+  // a new building settles: pale concrete dust pushed out from the footings
+  born:   { c: [[0.81, 0.78, 0.72]], n: 16, spread: 1.2, up: 0.3, out: 0.9, vy: [0.5, 1.1], g: 1, d: 1.2, r: 0.9, k: 0 },
+  // the file got bigger: sparks off the roof, thrown up, barely any drag
+  grow:   { c: [[1, 0.95, 0.82], [1, 0.86, 0.55]], n: 14, spread: 0.7, up: 0.1, out: 0.8, vy: [1.4, 1.0], g: 1, d: 0.1, r: 1.1, k: 0 },
+  // the file got smaller: rubble shed down the sides, heavy, no lift
+  shrink: { c: [[0.55, 0.44, 0.33], [0.46, 0.40, 0.34]], n: 14, spread: 1.3, up: 0.5, out: 0.5, vy: [-0.2, 0.5], g: 2, d: 0.6, r: 1.0, k: 0 },
+  // work starts: a thin ochre haze at the foot of the crane
+  dirty:  { c: [[0.78, 0.66, 0.40]], n: 10, spread: 1.0, up: 0.2, out: 0.5, vy: [0.3, 0.5], g: 0.5, d: 1.6, r: 0.8, k: 0 },
+  // the crane comes down: confetti, thrown hard enough to arc over the roofline
+  done:   { c: [[1, 0.82, 0.48], [1, 0.95, 0.82], [1, 0.60, 0.24]], n: 18, spread: 0.8, up: 0.2, out: 1.6, vy: [2.2, 1.2], g: 1, d: 0, r: 0.9, k: 0 },
+  // demolition: dark smoke, buoyant, dragged to a stop and left to hang
+  died:   { c: [[0.35, 0.35, 0.36], [0.28, 0.27, 0.28], [0.44, 0.42, 0.40]], n: 22, spread: 1.4, up: 0.6, out: 0.7, vy: [0.5, 0.6], g: -0.15, d: 0.9, r: 0.35, k: 1 },
+};
 
-function spawnDust(x, y, z, n, spread) {
-  for (let i = 0; i < n && dust.length < DUST_MAX; i++) {
+function fx(kind, x, y, z, n) {
+  const p = FX[kind];
+  const count = n || p.n;
+  for (let i = 0; i < count && dust.length < DUST_MAX; i++) {
     dust.push({
-      x: x + (Math.random() - 0.5) * spread, y: y + Math.random() * 0.3, z: z + (Math.random() - 0.5) * spread,
-      vx: (Math.random() - 0.5) * 0.9, vy: 0.5 + Math.random() * 1.1, vz: (Math.random() - 0.5) * 0.9,
-      life: 1, c: DUST_RGB,
-    });
-  }
-}
-
-// the ribbon cutting: a file leaving the dirty set drops its crane, and the
-// roof throws confetti. thrown ~3x harder than dust so the existing gravity
-// arcs it over the roofline instead of letting it puff sideways.
-function spawnSparks(x, y, z, n) {
-  for (let i = 0; i < n && dust.length < DUST_MAX; i++) {
-    dust.push({
-      x: x + (Math.random() - 0.5) * 0.8, y: y + 0.2, z: z + (Math.random() - 0.5) * 0.8,
-      vx: (Math.random() - 0.5) * 1.6, vy: 2.2 + Math.random() * 1.2, vz: (Math.random() - 0.5) * 1.6,
-      life: 1, c: SPARK_RGB[(Math.random() * SPARK_RGB.length) | 0],
+      x: x + (Math.random() - 0.5) * p.spread,
+      y: y + Math.random() * p.up,
+      z: z + (Math.random() - 0.5) * p.spread,
+      vx: (Math.random() - 0.5) * p.out,
+      vy: p.vy[0] + Math.random() * p.vy[1],
+      vz: (Math.random() - 0.5) * p.out,
+      life: 1, c: p.c[(Math.random() * p.c.length) | 0],
+      g: p.g, d: p.d, r: p.r, k: p.k,
     });
   }
 }
@@ -1311,7 +1350,10 @@ function tick(ts) {
       : f.bytes + (f.target - f.bytes) * Math.min(1, dt * 3.2);
     if (floorsOf(f.bytes) !== beforeFloors) {
       const w = fileWorld(f);
-      spawnDust(w.x, 0.2, w.z, 6, 1.1);
+      // a file gaining a floor throws sparks off its new roof; losing one sheds
+      // rubble down the sides. same event in the data, opposite reading
+      if (floorsOf(f.bytes) > beforeFloors) fx("grow", w.x, w.y, w.z);
+      else fx("shrink", w.x, w.y * 0.8, w.z);
     }
     f.flash = Math.max(0, f.flash - dt * 1.5);
     f.attn = Math.max(0, f.attn - dt * ATTN_DECAY);
@@ -1323,15 +1365,11 @@ function tick(ts) {
       f.grown = Math.min(1, f.grown + dt * 0.75);
       if (f.grown >= 1) {
         const w = fileWorld(f);
-        spawnDust(w.x, 0.2, w.z, 10, 1.2);
+        fx("born", w.x, 0.2, w.z);
       }
     }
     if (f.dying) {
       f.dying = Math.min(1, f.dying + dt * 1.5);
-      if (f.dying === 0.001) {
-        const w = fileWorld(f);
-        spawnDust(w.x, 0.3, w.z, 26, 1.5);
-      }
       if (f.dying >= 1) {
         disposeBuilding(path);
         files.delete(path);
@@ -1348,22 +1386,31 @@ function tick(ts) {
     else setBoot(`construindo ${phaseRepo}`, pct);
   }
 
-  let n = 0;
   for (let i = dust.length - 1; i >= 0; i--) {
     const p = dust[i];
     p.x += p.vx * dt; p.y += p.vy * dt; p.z += p.vz * dt;
-    p.vy -= dt * 1.5;
-    p.life -= dt * 0.9;
+    p.vy -= dt * 1.5 * p.g;
+    if (p.d) {
+      const k = Math.max(0, 1 - p.d * dt);
+      p.vx *= k; p.vy *= k; p.vz *= k;
+    }
+    p.life -= dt * p.r;
     if (p.life <= 0) dust.splice(i, 1);
   }
+  // one pass, two cursors: the layer a particle lands in is just p.k
+  let n = 0, m = 0;
   for (const p of dust) {
-    dustPos[n * 3] = p.x; dustPos[n * 3 + 1] = p.y; dustPos[n * 3 + 2] = p.z;
-    dustCol[n * 3] = p.c[0]; dustCol[n * 3 + 1] = p.c[1]; dustCol[n * 3 + 2] = p.c[2];
-    n++;
+    const buf = p.k ? smokePos : dustPos, col = p.k ? smokeCol : dustCol;
+    const j = p.k ? m++ : n++;
+    buf[j * 3] = p.x; buf[j * 3 + 1] = p.y; buf[j * 3 + 2] = p.z;
+    col[j * 3] = p.c[0]; col[j * 3 + 1] = p.c[1]; col[j * 3 + 2] = p.c[2];
   }
   dustGeo.setDrawRange(0, n);
   dustGeo.attributes.position.needsUpdate = true;
   dustGeo.attributes.color.needsUpdate = true;
+  smokeGeo.setDrawRange(0, m);
+  smokeGeo.attributes.position.needsUpdate = true;
+  smokeGeo.attributes.color.needsUpdate = true;
 
   for (const s of flashPool) {
     if (s.life > 0) {
@@ -1434,6 +1481,7 @@ window.__city = () => ({
   lit: [...buildings.values()].filter(b => b.lit > 0.4).length,
   minGrown: Math.min(...[...files.values()].map(f => f.grown)),
   dust: dust.length,
+  smoke: dust.filter(p => p.k).length,
   districts: layout.districts,
   cars: traffic.reduce((n, t) => n + t.mesh.count, 0),
   lamps: pools ? pools.count : 0,

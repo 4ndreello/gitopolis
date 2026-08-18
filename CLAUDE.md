@@ -137,18 +137,33 @@ that used to fire on every `layoutDirty`. The flip side is that the layout reflo
 ceiling above is now visible: a branch switch slides the city under a moving
 camera instead of hiding it behind a cut.
 
-### The confetti is the dust system
+### One particle system, six events
 
-A file leaving the dirty set drops its crane and throws confetti off the roof
-(`spawnSparks`). It is not a second particle system: `dustGeo` carries a `color`
-attribute and the material runs `vertexColors`, so a spark is a grain of dust
-with a warm colour and ~3x the upward velocity — same buffer, same loop, same
-draw call, and the existing gravity does the arc.
+Six things can happen to a file — `born`, `grow`, `shrink`, `dirty`, `done`,
+`died` — and each one is an entry in the `FX` table in `main.js`: colours,
+launch spread, gravity multiplier, drag, life rate, and which layer it draws in.
+`fx(kind, x, y, z, n)` is the only spawner. Before this the same beige puff
+stood for all of them with only the particle count varying, so the city could
+say that something happened but never what.
 
-`DUST_MAX` is a global pool, so the per-roof burst size is divided by how many
-files flipped in the same snapshot. Without that split, a 40-file commit spends
-the whole pool on the first few roofs and the rest of the city celebrates in
-silence. New files are born dirty and never flip, so the cold open stays quiet.
+It is still one array and one update loop. Colour is per-vertex (`vertexColors`),
+physics is per-particle (`g`, `d`, `r`), and `k` picks the buffer: the fine layer
+(`dustPoints`, size 0.45) or the smoke layer (`smokePoints`, size 1.1, opacity
+0.28). Smoke needs the second layer because a grain at 0.45 reads as a gnat
+swarm no matter how dark you paint it, and demolition has to look like
+demolition. Two draw calls total.
+
+Sizes are set against the rain, not against nothing: on a wet day
+(`weatherAt().rain`) the sky is already a field of specks at the old 0.3, which
+is what a per-event burst has to be told apart from.
+
+`DUST_MAX` is one global pool, so both batch events divide it by how many files
+they touch. That split lives in `ingest()` — the only place that knows a commit
+dropped 40 cranes at once, or a checkout deleted 40 files at once — which is why
+`died` spawns there rather than in the `dying` branch of the loop. Without it the
+first few roofs spend the whole pool and the rest of the city celebrates, or
+burns, in silence. New files are born dirty and never flip, so the cold open
+stays quiet.
 
 ### src/props.js: procedural props
 
