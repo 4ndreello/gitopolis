@@ -4,17 +4,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A desktop toy: a 3D city that is a live view of a git repository. Every tracked (or
-untracked-but-not-ignored) file is a building. File size sets height, directory sets
-district, uncommitted files wear scaffolding and a crane, and committing drops every
-crane at once.
+A desktop toy: a 3D city that is a live view of a git repository — up to four of them at
+once, each a neighbourhood of the same city. Every tracked (or untracked-but-not-ignored)
+file is a building. File size sets height, directory sets district, uncommitted files
+wear scaffolding and a crane, and committing drops every crane at once.
 
 ## Commands
 
 ```bash
 npm run build                        # esbuild -> bundle.js (required before serving)
 npm run dev                          # same, in --watch
-node server.mjs <path-to-any-repo>   # serve on :4173, watching that repo
+node server.mjs <path>               # serve on :4173. a repo, or a dir of repos
+                                     # (one level deep); the hud picks up to 4
 npm test                             # node test.mjs — the whole suite
 PORT=4180 node server.mjs ../foo     # override port
 ```
@@ -35,9 +36,11 @@ server.mjs  ── git + fs ──►  SSE /events  ──►  src/main.js (thre
              (node)          full snapshot      diffs vs prev frame
 ```
 
-`server.mjs` sends a **full snapshot** on every change (`{repo, branch, files[]}`), not a
-diff. The client owns all diffing and animation. This is deliberate: snapshots are
-idempotent, so a dropped or duplicated message cannot desync the city.
+`server.mjs` sends a **full snapshot** on every change (`{repo, branch, watching,
+files[]}`), not a diff, and one message carries one repo. The client owns all diffing and
+animation. This is deliberate: snapshots are idempotent, so a dropped or duplicated
+message cannot desync the city — which is also what lets four repos share one stream
+without any ordering guarantee between them.
 
 ### The load-bearing invariant
 
@@ -75,10 +78,98 @@ buildings occupy. The renderer paves `inner` and lays the rest of the cell to la
 Paving only `inner` left a two-file district as a small plate marooned in the middle of
 the asphalt, which read as a city block built on top of the road.
 
-**Known ceiling:** block size and grid width derive from file count, so crossing a
-threshold reshuffles every coordinate. Invisible during normal editing, visible on a
-branch switch that adds dozens of files. Unfixed. The fixes considered were growing the
-grid in power-of-two steps, or animating the reflow as a city-wide slide.
+**Known ceiling, mostly closed:** block size and grid width derive from file count, so
+crossing a threshold reshuffled every coordinate — invisible during normal editing,
+visible on a branch switch. `blockStep` and `rectStep` quantize both, which is the
+"power-of-two steps" fix this note used to list as considered-and-not-done. See the
+multi-repo section below for why four repos are what forced it. What is left is a real
+reflow when a *step* is crossed; animating it as a city-wide slide is still unbuilt.
+
+### Multi-repo: four repos, one city
+
+Up to four repos are watched at once. Each becomes a contiguous rectangle of the same
+district grid, separated by a one-cell green belt and named by a sign.
+
+**One `planCity` call, not four layouts.** The alternative was a layout per repo, offset
+on a 2x2. It loses on cost: `layout` is a single module-level object read at 21 sites in
+`main.js` — `worldPos`, `fileWorld`, the ground rebuild, road lines, lamp spacing, tree
+spots, car lanes, pedestrian rings, the sun orbit, the fog span, the home framing. One
+merged call leaves all 21 untouched; four layouts need an indirection at every one. The
+whole feature then lands in cell allocation.
+
+**Two step tables, and merging them reopens a bug.** `BLOCK_STEPS` quantizes the cell
+pitch; `RECT_STEPS` quantizes a repo's rectangle and is far coarser. They are not
+duplicates and must not be unified. Rectangle slack is whole unclaimed cells, which
+already become parks; pitch slack is lawn inside *every* block and therefore multiplies.
+`BLOCK_STEPS` also holds both 3 and 4, so it cannot stabilise a rectangle at the scale
+where the problem lives: nine top-level directories becoming ten crosses
+`ceil(sqrt(9))` to `ceil(sqrt(10))`.
+
+Every repo gets the *same* rectangle, sized to the largest. Sizing each to its own
+contents was the obvious version and it reintroduced the pitch bug one level up —
+widths were continuous and origins were their running sum, so a repo gaining a directory
+slid its neighbours sideways. A repo you are not looking at must not move because you
+ran `mkdir src/thing` in another one. Uniform alone was not enough either: when the repo
+that grows is the largest, the shared rectangle grows and everything moves anyway. Hence
+uniform *and* quantized.
+
+**The seeding rule**, which is one character apart at the call site:
+
+- **building identity** — plot, district, `litAt`, window pattern — is seeded from the
+  composite key `repo + "\0" + path`. Two repos can each hold a `src/index.js`; without
+  this they fight over one plot and one entry in the `buildings` Map, and the building
+  flickers between two positions every frame.
+- **file type** — the facade colour from `extOf(path)` — is seeded from the bare path.
+  Two `.rs` files are the same colour in every repo. That is the point of colouring by
+  extension.
+
+`dirKey` still takes the bare path. Prefixing the path instead would spend one level of
+`DISTRICT_DEPTH` on the repo name, collapsing `src/three/foo.js` into `gitopolis/src`
+rather than `src/three`.
+
+**The identity seed is the repo's *name*, not its path.** `server.mjs` sends
+`repo.name`, a basename. Sending the resolved path would make `node server.mjs ../foo`
+and `node server.mjs /home/me/dev/foo` two different cities for the same repo — the
+"restarting produces an identical city" invariant broken by how the argument was typed.
+
+**One repo per SSE message**, still a full snapshot: `{repo, branch, watching, files}`.
+Bundling all four would re-send four repos' worth of JSON whenever any one changed. Per
+repo keeps each message idempotent — the reason snapshots are full in the first place —
+while the wire cost stays proportional to what moved. `lastPayload` is per repo too, so
+a busy repo never un-quiets its idle neighbours.
+
+**The client's deletion sweep is scoped, and that cuts both ways.** A snapshot names one
+repo, so an unscoped sweep reads repo B's arrival as "every file in repo A vanished" and
+demolishes the neighbourhood next door. Scoping it then breaks the other direction: a
+repo dropped from the selection stops sending snapshots, so the sweep can never notice
+it went and its buildings stand forever. `connect` is the only place that knows the
+*subscription* changed, which is why the retirement lives there rather than in `ingest`.
+
+**A repo that errors counts as having reported.** The boot curtain waits for every
+subscribed repo before lifting, or the city is revealed with a hole in it. Leaving an
+erroring repo out of that tally was harmless with one repo — an error meant there was
+nothing to reveal — but with four it held an opaque overlay over three healthy
+neighbourhoods that were already built.
+
+**Draw calls: measured, and the obvious optimisation was wrong.** With four repos and
+132 files, `__city().dc` is 1046 idle and 1855 at cold open. A building is roughly eight
+draw calls, not one — body, roof, cap, the three floodlight meshes, scaffold posts and
+crane bars while dirty, and the shadow pass counts every caster again. Instancing
+facades by (pattern, colour) therefore buys about 18% here, in exchange for the
+project's first custom shader: `emissiveIntensity` is per building and a material
+uniform is shared across an `InstancedMesh` bucket, so keeping the one-building-at-a-time
+window ramp needs an `InstancedBufferAttribute` plus `onBeforeCompile`. Not done.
+Reopen if `dc` passes ~3000 idle or a single repo passes ~800 files, and re-measure
+first.
+
+The better target at that point is towers, not facades. `flood` (on shared `streetMat`)
+and `pool` (on `floodPoolMat`) have no per-building uniform and instance cleanly with no
+shader patch; `wash` cannot, because its opacity is `night * (1 - b.lit/0.5)`, per
+tower. But it is not free: the fixtures are children of a group that rises and dies with
+its building, so instancing moves that bookkeeping to the CPU — eight matrices per tower
+per frame while it grows, since their scale follows `h`. It trades `floods * 8 - 2` draw
+calls for that write. Measure the towers' share in isolation before committing to it;
+`__city().floods` gives the count.
 
 ### Streets: one derivation, four consumers
 
@@ -288,6 +379,20 @@ Change detection is two mechanisms, and both are needed:
   subdirectories, so no single non-recursive watch catches them reliably. Measured
   commit-to-cranes-drop latency is ~280ms.
 
+Both are per repo. Each watched repo owns its watcher and its own 700ms interval, armed
+behind a stagger offset so four repos do not scan on the same tick, with an `inflight`
+flag so a scan slower than its own interval drops a tick instead of lapping itself. A
+repo is watched while at least one client subscribes to it; the last leaver takes its
+watcher and timer down.
+
+`fs.watch` needs an `'error'` listener, not just a `try/catch`. The `try/catch` covers
+only the synchronous open; a watcher that loses access to its tree afterwards
+(`chmod 000 .git` on a live repo does it) reports that asynchronously, and an unhandled
+`'error'` event takes the whole node process down. With one repo that died along with
+the only city on screen. With four it would drop three healthy neighbourhoods because a
+fourth changed permissions. The handler drops that repo to poll-only, which is what the
+`watching: false` flag already on the wire exists to tell the hud about.
+
 ### No assets, by design
 
 Every texture (facade patterns, lit windows, clouds) is drawn into a canvas at runtime;
@@ -336,7 +441,8 @@ twenty-line stub instead.
 `src/main.js` exposes two hooks on `window` for headless inspection:
 
 ```js
-window.__city()            // { files, dirty, growing, dying, cranes, minGrown, dust }
+window.__city()            // { files, dirty, growing, dying, cranes, minGrown, dust,
+                           //   repos: [{ name, files, dirty }], dc, tris, signs, ... }
 window.__toggle("dust")    // also "cars", "clouds", "city", "ground", "flood"
 window.__time(0.75)        // freeze the hour; null resumes. the F3 slider writes this
 ```
@@ -359,7 +465,23 @@ makes drivers emit garbage triangles (hence the exact per-material instance coun
 
 Note the cold open: on launch every file is new to the client, so the whole city rises
 under scaffolding and settles after ~5s. A screenshot taken before then shows cranes
-everywhere and is not a bug.
+everywhere and is not a bug. It is also the **peak** mesh count the scene ever reaches —
+every building carrying scaffolding, a crane and beacons at once — so it is the sample
+to take when measuring load, not the commit that drops them.
+
+**Do not measure cost with `fps`.** It counts `requestAnimationFrame` callbacks, so it
+is capped by vsync: the renderer can sit at 7ms, one millisecond from dropping frames,
+and the panel still reads a contented 120. It reports the ceiling, not the load. Read
+`__city().dc` (`renderer.info.render.calls`) and `tris` instead, and isolate a layer's
+share with `__toggle`. That distinction is the whole reason facade instancing was
+measured and then not built — see the multi-repo section.
+
+And close the tab when you are done. Every left-open headless tab keeps rasterizing
+three.js through the swiftshader CPU rasterizer forever, because the render loop never
+idles; `fetch('/json/close/<targetId>')` then kill the browser. Also check the port
+first — there is usually already a server on 4173, and `EADDRINUSE` fails quietly while
+the page still loads from that one, which has produced a full round of testing against
+the wrong repo.
 
 ## Fixed: the flat white roofs
 

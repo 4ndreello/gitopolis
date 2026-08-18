@@ -148,8 +148,62 @@ selected in the picker render as two neighbourhoods with a belt between them.
 
 ## Task 4 — `src/main.js`: instance facades by (pattern, colour)
 
-**Gated on a measurement. Do not start this task until task 3 has landed and the
-number below exists.**
+**CLOSED, NOT DONE. The gate measurement said no.** Everything below is kept as
+the record of why, and as the brief to pick up if the threshold is ever crossed.
+
+### The measurement
+
+Taken over CDP at 1280x800, reading `window.__city().dc`
+(`renderer.info.render.calls`):
+
+| scenario | `dc` |
+|---|---|
+| 4 repos, 132 files, cold open (every crane up) | 1855 |
+| 4 repos, 132 files, idle | 1046 |
+| 2 repos, 72 files, idle | ~600 |
+
+### Why that closes it
+
+The estimate that motivated this task — "2000 files means 2000 facade draw
+calls, instancing takes it to 40" — was wrong about which meshes dominate. A
+building is roughly eight draw calls, not one: `body`, `roof`, `cap` on towers,
+`flood`/`wash`/`pool` on towers, four scaffold posts and five crane bars while
+dirty, and the shadow pass counts every caster again. The facade `body` is one
+of those eight.
+
+So instancing facades removes on the order of 18% of the draw calls at the file
+counts this repo set actually has, in exchange for the project's first custom
+shader — `emissiveIntensity` is per building (`main.js:635`,
+`b.facade.emissiveIntensity = b.lit`) and a material uniform is shared across an
+`InstancedMesh` bucket, so preserving the one-building-at-a-time window ramp
+needs an `InstancedBufferAttribute` plus an `onBeforeCompile` patch. Every
+material in the project is stock three with a procedural texture today.
+
+The `ponytail:` comment at `main.js:415-417` said "if a 2k-file repo ever
+stutters". It does not stutter, and these are not 2k-file repos.
+
+### When to reopen
+
+The win scales linearly with file count while the cost is fixed, so this becomes
+correct at scale rather than never. Reopen when either holds:
+
+- `__city().dc` exceeds ~3000 idle, or
+- a single subscribed repo passes ~800 files.
+
+At that point the mechanism below is the one to build. Re-measure first; do not
+trust these numbers against a different repo set.
+
+### A better target if draw calls ever do matter
+
+Towers, not facades. Each tower carries `flood`, `wash`, `pool` and `cap` as
+separate meshes — 19 towers in the measured scene, so ~76 meshes. `flood` and
+`pool` have no per-building uniform, so they instance cleanly with no shader
+patch at all. `wash` cannot: its opacity is per tower, backing off as that
+tower's own windows come on. That is a smaller, cheaper change than the facade
+work and it removes more meshes. It is also code another session owns, so agree
+the boundary before touching it.
+
+### The original brief, kept for whoever reopens this
 
 Measure first. The `ponytail:` comment this task acts on says "if a 2k-file repo
 ever *stutters*" — an observation, not a prediction — and the 2000-draw-call
@@ -257,6 +311,26 @@ the composite-key seeding rule, `blockStep` and what it fixes, one-repo-per-SSE
 message and why it stays idempotent, and the staggered per-repo poll. Amend the
 layout section's "Known ceiling" note, which `blockStep` now partly addresses,
 and the props section to mention facade instancing.
+
+Three specifics that will not survive being left implicit:
+
+- **Two step tables, on purpose.** `RECT_STEPS` is far coarser than
+  `BLOCK_STEPS`, and merging them is the obvious future "simplification" that
+  would silently reopen the neighbour-slide bug. The reason they differ is that
+  they buy different things: rectangle slack is whole unclaimed cells, which
+  already become parks, while pitch slack is lawn inside every single block and
+  therefore multiplies. `BLOCK_STEPS` also holds both 3 and 4, so it cannot
+  stabilise a rectangle at the scale where the slide actually happens.
+- **The identity seed is the repo's name, not its path.** `server.mjs` sends
+  `repo.name` (a basename) rather than the resolved path. If it sent the path,
+  `node server.mjs ../foo` and `node server.mjs /home/me/dev/foo` would produce
+  two different cities for the same repo — the load-bearing "restarting produces
+  an identical city" invariant broken by how the user happened to type an
+  argument.
+- **The seeding rule itself**: composite key for building identity (plot,
+  district, `litAt`, window pattern), bare path for file type (facade colour).
+  Say which line each applies to, because the two are one character apart at the
+  call site.
 
 A peer session also edits `CLAUDE.md`. Merge into the copy on disk rather than
 overwriting it.
