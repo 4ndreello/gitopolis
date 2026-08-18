@@ -127,6 +127,36 @@ Three things here are not free choices:
 - Only the distance moves; the polar angle is left alone. `CAM_ANGLE` carries a
   measured contract (the moon arc rides just under the top edge at that pitch).
 
+### Framing is per-viewport, not per-fov
+
+`fitDistance` and `frameFraction` (`city.js`, tested in `test.mjs` at simulated
+sizes) own the home framing. Two things were wrong before and both only showed up
+in a small window:
+
+- the fit used the *vertical* fov alone, so it was correct at one aspect and let
+  the far side of the city walk off the edge of a portrait or a squat one.
+  `fitDistance` fits both axes, at the camera pitch: a ground disc of radius `r`
+  seen from `CAM_ANGLE` covers `r` horizontally and `r*sin(pitch)` vertically.
+- home was always the *whole city*. At 300px that is a static logo — buildings
+  land on three pixels each and none of the cars, cranes or lit windows read.
+  `frameFraction` shrinks what home covers with the canvas (a district at pip
+  size, the skyline on a desktop), so a small window is a close view that moves,
+  not a distant one that does not. `autoRotateSpeed` scales with it for the same
+  reason; at 0.18 the orbit is five minutes long.
+- fitting *both* axes is still contain, and contain is the small-plate picture
+  in a 230x330 window: the long axis fits and the short one is left over. The
+  `cover` argument blends contain -> cover with the canvas, so a pip window
+  fills its tight axis and lets the rest run off the edge. Cropping is the point
+  of a small window, not a defect.
+
+The near limit is on the distance (16), never on the radius. Flooring the radius
+framed an 8-unit box around a 5-unit city, which is exactly how an 18-file repo
+ended up as a plate in the middle of a small window.
+
+`resize()` owns both, so dragging the window re-frames instead of stretching.
+Real events still win: `attn` pulls the camera to whatever actually changed and
+that distance is computed from the event, never from the home framing.
+
 Deleted files pull through a separate `ghosts` array, because `dying` removes the
 entry from `files` after 0.67s while the attention lasts ~2.9s — following an
 entry that no longer exists makes the centroid jump mid-travel.
@@ -242,6 +272,14 @@ same grid cells.
 window.__city()            // { files, dirty, growing, dying, cranes, minGrown, dust }
 window.__toggle("dust")    // also "cars", "clouds", "city", "ground"
 ```
+
+`--virtual-time-budget` never expires against the endless `requestAnimationFrame`,
+so `--screenshot` and `--dump-dom` hang. Driving the
+page over CDP does work and needs no puppeteer — node's global `WebSocket`, a
+`Target.attachToTarget {flatten:true}` session, `Emulation.setDeviceMetricsOverride`
+for the viewport (`--window-size` alone does not set it under `--headless=new`), a
+plain ~20s wait for the cold open, then `Runtime.evaluate` and
+`Page.captureScreenshot`. That is how the per-viewport framing above was measured.
 
 Visual bugs here are best confirmed with a headless browser using
 `--use-gl=angle --use-angle=swiftshader --enable-unsafe-swiftshader`, screenshotting

@@ -1,7 +1,7 @@
 // smallest thing that fails if the derivation breaks.
 // run: node test.mjs
 import assert from "node:assert/strict";
-import { dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus, fmtBytes } from "./src/city.js";
+import { fitDistance, fillFor, frameFraction, dirKey, floorsOf, planCity, isHouse, DAY_MS, dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt, roadLines, intersections, nightK, GUT, focus, fmtBytes } from "./src/city.js";
 
 // --- fmtBytes stays three characters wide across the unit boundaries ---
 assert.equal(fmtBytes(0), "0");
@@ -212,4 +212,71 @@ assert.equal(focus([]), null, "nothing changed means no opinion about where to l
     assert.ok(r <= last + 1e-9, "radius must never jump as attention decays");
     last = r;
   }
+}
+
+// --- framing: the city has to fit the viewport it is actually rendered into ---
+// screen fraction the city spans, by projecting the two extremes with the same
+// small-angle approximation fitDistance uses. 1 means it exactly touches the edge.
+function spans(dist, aspect, { r = 20, h = 3.9, fov = 32, pitch = 52 } = {}) {
+  const vTan = Math.tan((fov / 2) * Math.PI / 180), p = pitch * Math.PI / 180;
+  return {
+    x: r / (dist * vTan * aspect),
+    y: (r * Math.sin(p) + h * Math.cos(p)) / (dist * vTan),
+  };
+}
+{
+  // whatever the viewport, the city lands inside it and fills most of the tight axis
+  for (const [w, hpx] of [[320, 200], [420, 320], [900, 600], [1920, 1080], [600, 900], [400, 800]]) {
+    const fill = fillFor(w, hpx);
+    const d = fitDistance(20, 3.9, 32, w / hpx, 52, fill);
+    const s = spans(d, w / hpx);
+    assert.ok(s.x <= 1.001 && s.y <= 1.001, `city overflows ${w}x${hpx}: ${JSON.stringify(s)}`);
+    assert.ok(Math.max(s.x, s.y) > fill - 1e-6, `city marooned in ${w}x${hpx}: ${JSON.stringify(s)}`);
+  }
+}
+// a portrait viewport is horizontally starved and must pull further back than a
+// landscape one of the same height — this is the whole bug on a narrow window
+assert.ok(
+  fitDistance(20, 3.9, 32, 0.6, 52, 0.9) > fitDistance(20, 3.9, 32, 1.8, 52, 0.9),
+  "narrow viewports need more distance, not the same"
+);
+// a small canvas gets a tighter frame: at 300px the buildings are a few pixels
+// wide, so the margin a desktop can afford is dead screen there
+assert.ok(fillFor(320, 200) > fillFor(1920, 1080), "small canvas fills more of the frame");
+assert.ok(fillFor(320, 200) <= 1 && fillFor(1920, 1080) >= 0.6, "fill stays sane at both ends");
+// monotonic in what it is framing, or growth would pull the camera inwards
+{
+  let last = 0;
+  for (let r = 5; r < 80; r += 3) {
+    const d = fitDistance(r, 3.9, 32, 1.6, 52, 0.85);
+    assert.ok(d > last, "distance must grow with the city");
+    last = d;
+  }
+}
+
+// --- a small viewport frames less city, not the same city further away ---
+// the whole-city plate is unreadable at 300px: a district you are standing in
+// carries more information than a city you cannot resolve. so the fit target
+// shrinks with the canvas instead of the distance growing.
+assert.ok(frameFraction(320, 210) < frameFraction(1920, 1080) * 0.7, "a pip window frames a district, not the skyline");
+assert.equal(frameFraction(1600, 1000), 1, "a desktop still gets the whole city");
+{
+  let last = 0;
+  for (let px = 200; px <= 1400; px += 50) {
+    const f = frameFraction(px * 1.5, px);
+    assert.ok(f >= last, "framed fraction must grow with the canvas, never dip");
+    assert.ok(f > 0.2 && f <= 1, `framed fraction out of range at ${px}: ${f}`);
+    last = f;
+  }
+}
+
+// --- cover: a small window crops, it does not shrink the city to fit ---
+{
+  const arg = [20, 3.9, 32, 0.7, 52, 0.9];           // portrait, horizontally starved
+  const contain = fitDistance(...arg, 0), crop = fitDistance(...arg, 1);
+  assert.ok(crop < contain, "covering sits closer than containing");
+  const s = spans(crop, 0.7);
+  assert.ok(Math.min(s.x, s.y) > 0.9 - 1e-6, "the tight axis is filled, not left over");
+  assert.ok(Math.max(s.x, s.y) > 1, "and the other one is allowed to run off the edge");
+  assert.equal(fitDistance(...arg), contain, "contain stays the default");
 }

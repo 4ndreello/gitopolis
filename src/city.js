@@ -255,3 +255,48 @@ export function focus(pts) {
   for (const p of pts) r = Math.max(r, Math.hypot(p.x - cx, p.z - cz) * p.w);
   return { x: cx, z: cz, r };
 }
+
+// ---- framing ----
+// how far the camera has to sit to fit a city of ground radius `r` and skyline
+// height `h` into a viewport, given the vertical fov, its aspect and the pitch
+// the camera looks down at. framing off the vertical fov alone (what this used
+// to do) is right only at one aspect: a portrait or a squat window is starved
+// horizontally, and the far side of the city walks off the edge.
+//
+// the projection is the small-angle one — a ground disc of radius r seen from
+// `pitch` degrees up covers r horizontally and r*sin(pitch) vertically, with
+// the buildings adding h*cos(pitch) on top. exact enough at fov 32; `fill`
+// carries the slack for the asymmetry of the far-side skyline.
+// `cover` picks which axis wins: 0 fits both (the whole city inside the frame,
+// the short axis left over) and 1 fills the tight axis and crops the other.
+// contain is right on a desktop and wrong in a 230x330 window, where fitting
+// the long axis leaves the city a small plate floating in the middle of the
+// short one. cropping is the point of a small window, not a defect.
+export function fitDistance(r, h, fovDeg, aspect, pitchDeg, fill, cover = 0) {
+  const vTan = Math.tan((fovDeg / 2) * Math.PI / 180);
+  const p = pitchDeg * Math.PI / 180;
+  const halfV = r * Math.sin(p) + h * Math.cos(p);
+  const v = halfV / vTan, hz = r / (vTan * aspect);
+  return (Math.max(v, hz) * (1 - cover) + Math.min(v, hz) * cover) / fill;
+}
+
+// how much of that viewport the city should actually take. a 300px picture-in-
+// picture window and a 1080p one are the same framing in world units and very
+// different pictures: at 300px a building is three pixels wide, so the margin a
+// desktop reads as breathing room is just dead screen. small canvas, tight frame.
+export function fillFor(w, h) {
+  const px = Math.min(w, h);
+  return Math.max(0.72, Math.min(0.94, 1.06 - px / 3600));
+}
+
+// how much of the city a viewport should frame. the whole-city plate is the
+// right picture on a desktop and the wrong one at 300px: buildings land on
+// three pixels each and the thing reads as a static logo. a small canvas gets
+// a district instead — close enough that the cars, the cranes and the lit
+// windows are the picture, and close enough that autoRotate is visible motion.
+// real events still override this: attention pulls the camera wherever a file
+// actually changed, and that framing is computed from the event, not from here.
+export function frameFraction(w, h) {
+  const px = Math.min(w, h);
+  return Math.max(0.34, Math.min(1, (px - 120) / 780));
+}

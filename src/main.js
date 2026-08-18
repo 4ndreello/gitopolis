@@ -4,7 +4,7 @@ import {
   GUT, FLOOR_H, MAX_FLOORS,
   hash, rand01, dirKey, extOf, floorsOf, isHouse, planCity, fmtBytes,
   dayT, dayIndex, clockLabel, litAt, trafficAt, weatherAt,
-  roadLines, intersections, nightK, focus,
+  roadLines, intersections, nightK, focus, fitDistance, fillFor, frameFraction,
 } from "./city.js";
 import {
   TEX_GLOW, GEO_CAR, GEO_VAN, GEO_TRUCK, GEO_LAMP, GEO_BUSSTOP, GEO_BIN,
@@ -1166,8 +1166,17 @@ const homeTarget = new THREE.Vector3(0, 1, 0);
 let homeDist = 40;
 let framed = false;
 
-function distFor(radius) {
-  return radius / Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) * 0.62;
+// framing is per-viewport, not per-fov: fitDistance fits the horizontal axis
+// too, and fill tightens the margin on a small canvas. resize() owns both
+// inputs, so a window drag re-frames the city instead of leaving a 300px
+// picture-in-picture window looking at the same distant plate as a 1080p one.
+let fill = 0.85;
+let framedFrac = 1;          // how much of the city the home framing covers
+function distFor(radius, h = MAX_FLOORS * FLOOR_H) {
+  // the smaller the canvas the more it crops instead of fitting: a desktop
+  // frames the whole city, a pip window fills its short axis and lets the rest
+  // run off the edge
+  return fitDistance(radius, h, camera.fov, camera.aspect, CAM_ANGLE, fill, 1 - framedFrac);
 }
 
 // fog rides the eased distance so a close-up does not put the far side of the
@@ -1180,9 +1189,19 @@ function applyFog(dist) {
 }
 
 function frameCamera() {
-  const r = Math.max(layout.gw, layout.gh) * 0.72 + 6;
-  homeTarget.set(0, Math.min(6, r * 0.1), 0);
-  homeDist = distFor(r);
+  // on a small canvas home is a district, not the skyline — see frameFraction.
+  // the floor keeps the camera outside the buildings in a one-district repo
+  const r = (Math.max(layout.gw, layout.gh) * 0.72 + 2) * framedFrac;
+  // raising the look-at point pushes the whole city down the frame by the same
+  // projected amount, so it has to be fed to the fit as vertical extent or the
+  // near corner clips off the bottom edge on a wide window
+  const ty = Math.min(4, r * 0.08);
+  homeTarget.set(0, ty, 0);
+  // the floor is on the distance, not on the radius: flooring the radius framed
+  // an 8-unit box around a 5-unit city, which is exactly the small-plate-in-the-
+  // middle picture in a small repo. 16 is the near limit, below which the pitch
+  // stops clearing the towers
+  homeDist = Math.max(16, distFor(r, Math.max(MAX_FLOORS * FLOOR_H, ty)));
   // the module-scope call happens before the first snapshot, on planCity([]) —
   // snapping there would frame an empty world and burn the one-shot
   if (framed || !layout.districts) return;
@@ -1206,7 +1225,7 @@ function frameCamera() {
 // one save is a close-up, a commit is the whole city, and going home is just
 // the radius growing — there is no "return" state.
 const ATTN_DECAY = 0.35;     // ~3s of pull per event
-const FOCUS_MARGIN = 6;      // same slack frameCamera leaves around the city
+const FOCUS_MARGIN = 6;      // close-up slack: a single change has r 0, so this is what sets how near one save gets
 const _want = new THREE.Vector3();
 const _off = new THREE.Vector3();
 const _pts = [];
@@ -1229,7 +1248,7 @@ function driveCamera(dt) {
   // city units scale with sqrt(file count), so an absolute floor would be a
   // dive in a big repo and no movement at all in a small one
   const dist = f
-    ? THREE.MathUtils.clamp(distFor(f.r + FOCUS_MARGIN), homeDist * 0.35, homeDist)
+    ? THREE.MathUtils.clamp(distFor(f.r + FOCUS_MARGIN), Math.max(13, homeDist * 0.35), homeDist)
     : homeDist;
   _want.set(f ? f.x : homeTarget.x, homeTarget.y, f ? f.z : homeTarget.z);
   // 1 - exp(-dt*k) instead of a fixed alpha: same easing at 30 and at 144 fps
@@ -1434,6 +1453,14 @@ function resize() {
   renderer.setSize(r.width, r.height, false);
   camera.aspect = r.width / Math.max(1, r.height);
   camera.updateProjectionMatrix();
+  fill = fillFor(r.width, r.height);
+  framedFrac = frameFraction(r.width, r.height);
+  // a close frame is only alive if it moves: at 0.18 the orbit is five minutes
+  // long, which at pip size reads as a still image of a city
+  controls.autoRotateSpeed = THREE.MathUtils.lerp(0.6, 0.22, framedFrac);
+  // recompute homeDist for the new viewport. frameCamera only snaps once, so
+  // after the first frame this just moves the target driveCamera eases towards
+  frameCamera();
 }
 new ResizeObserver(resize).observe(canvas);
 resize();
