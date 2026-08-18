@@ -248,13 +248,18 @@ export const GEO_WASH = mergeGeometries([
 // the wash itself. additive like the lamp pools, so it must reach zero alpha on
 // three sides: at the top, where the beam runs out, and on both edges, or the
 // quad reads as a lit rectangle taped to the wall instead of a beam.
+//
+// the quad is the WHOLE wall now (main.js scales y by h, not h/3), so the ramp
+// carries the beam: full at the pavement, still 0.62 at half height, out at the
+// roof. dying at 0.3 of a full-height quad would look identical to the old
+// third-height one — the height and this ramp only mean anything together.
 export function mkWashTex() {
   const c = document.createElement("canvas");
   c.width = 64; c.height = 128;
   const g = c.getContext("2d");
   const up = g.createLinearGradient(0, 128, 0, 0);
-  up.addColorStop(0, "rgba(255,255,255,0.92)");
-  up.addColorStop(0.3, "rgba(255,255,255,0.36)");
+  up.addColorStop(0, "rgba(255,255,255,1)");
+  up.addColorStop(0.5, "rgba(255,255,255,0.62)");
   up.addColorStop(1, "rgba(255,255,255,0)");
   g.fillStyle = up;
   g.fillRect(0, 0, 64, 128);

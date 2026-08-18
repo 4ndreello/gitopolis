@@ -317,9 +317,13 @@ const poolMat = new THREE.MeshBasicMaterial({
 // other light in the city — windows, lamp heads, headlights, pools — is ochre,
 // and an ochre wash fuses with the lit windows right above it. this one has to
 // read as light the city points AT the building, not light coming out of it.
+// toneMapped:false is the strength knob, not opacity. ACES eats a full-alpha
+// additive quad down to ~0.8 and rolls the highlight off on top of that, and
+// raising opacity past 1 does nothing at all — GL clamps the SRC_ALPHA blend
+// factor to 1. Skipping the tonemap is what finally made the beam carry.
 const washMat = new THREE.MeshBasicMaterial({
   map: mkWashTex(), color: 0xbfd6ff, transparent: true, depthWrite: false,
-  opacity: 0, blending: THREE.AdditiveBlending, fog: false,
+  opacity: 0, blending: THREE.AdditiveBlending, fog: false, toneMapped: false,
 });
 // same puddle the lamps throw, in the floodlight's colour. it is the half of
 // the effect that carries at camera distance: from up here the paving is a big
@@ -330,6 +334,31 @@ const floodPoolMat = new THREE.MeshBasicMaterial({
 });
 const scaffoldMat = new THREE.MeshStandardMaterial({ color: 0xe8a13a, roughness: 0.6, metalness: 0.2 });
 const craneMat = new THREE.MeshStandardMaterial({ color: 0xf0b455, roughness: 0.5, metalness: 0.3 });
+
+// obstruction lights on the rig. no THREE.PointLight: a real light costs on
+// every lit material in the scene and recompiles shaders when the count changes
+// (same reason the tower floodlights are quads). a beacon is a dot that ignores
+// tonemapping plus an additive halo sprite, which is what actually reads at
+// camera distance — the dot alone is one pixel.
+const GEO_BEACON = new THREE.SphereGeometry(0.035, 6, 4);
+const beaconMat = (c) => new THREE.MeshBasicMaterial({ color: c, toneMapped: false, fog: false });
+const haloMat = (c) => new THREE.SpriteMaterial({
+  map: mkPoolTex(), color: c, transparent: true, depthWrite: false,
+  blending: THREE.AdditiveBlending, opacity: 0.85, toneMapped: false, fog: false,
+});
+const RED = 0xff2d18, GREEN = 0x2bff72;
+const dotRed = beaconMat(RED), dotGreen = beaconMat(GREEN);
+const glowRed = haloMat(RED), glowGreen = haloMat(GREEN);
+// children[0] is the dot, children[1] the halo — the halo is night-only, since
+// additive over a daylit sky is a pale smudge
+const mkBeacon = (dot, glow) => {
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(GEO_BEACON, dot));
+  const s = new THREE.Sprite(glow);
+  s.scale.set(0.34, 0.34, 1);
+  g.add(s);
+  return g;
+};
 const trunkMat = new THREE.MeshStandardMaterial({ color: 0x6b5540, roughness: 0.9 });
 const leafMat = new THREE.MeshStandardMaterial({ color: 0x5d7f52, roughness: 0.85 });
 
@@ -417,7 +446,7 @@ function makeBuilding(f) {
   let wash = null, flood = null, pool = null;
   if (!house && floors > 8) {
     flood = new THREE.Mesh(GEO_FLOOD, streetMat);   // lit by the same nightK ramp as the lamps
-    wash = new THREE.Mesh(GEO_WASH, washMat);
+    wash = new THREE.Mesh(GEO_WASH, washMat.clone());   // per-tower: its opacity backs off as that tower's own windows come on
     pool = new THREE.Mesh(GEO_FLOODPOOL, floodPoolMat);
     group.add(flood, wash, pool);
   }
@@ -446,11 +475,18 @@ function makeBuilding(f) {
   const cMast = new THREE.Mesh(GEO_MAST, craneMat); cMast.castShadow = true;
   const cJib = new THREE.Mesh(GEO_BOX, craneMat); cJib.castShadow = true;
   const cCab = new THREE.Mesh(GEO_BOX, craneMat);
-  crane.add(cMast, cJib, cCab);
+  // red strobes on top of the mast, green steady out at the jib tip, red steady
+  // on a scaffold corner. they ride the crane group, so they sweep with the jib
+  const bMast = mkBeacon(dotRed, glowRed);
+  const bJib = mkBeacon(dotGreen, glowGreen);
+  crane.add(cMast, cJib, cCab, bMast, bJib);
   group.add(crane);
+  const bScaf = mkBeacon(dotRed, glowRed);
+  scaffold.add(bScaf);
 
   const b = {
     group, body, roof, cap, prop, mast, scaffold, crane, wash, flood, pool, floors, house,
+    bMast, bJib, bScaf,
     w: (house ? 0.80 : 0.70) + rand01(seed) * 0.12,
     d: (house ? 0.80 : 0.70) + rand01(seed + 7) * 0.12,
     spin: rand01(seed + 3) * Math.PI * 2,
@@ -466,6 +502,7 @@ function disposeBuilding(path) {
   if (!b) return;
   cityRoot.remove(b.group);
   if (b.facade) b.facade.dispose();   // cloned per building, so nothing else holds it
+  if (b.wash) b.wash.material.dispose();   // ditto
   buildings.delete(path);
 }
 
@@ -504,10 +541,18 @@ function updateBuilding(f, t, dt) {
   }
   if (b.wash) {
     // 0.012 clear of each wall: coplanar with the facade it z-fights, the same
-    // reason the Y_* stack exists. the beam dies a third of the way up, so it
-    // describes the base of the tower instead of washing out the lit windows.
-    b.wash.scale.set(b.w + 0.024, Math.max(0.001, h / 3), b.d + 0.024);
-    b.wash.visible = b.pool.visible = floodOn && nightK(t) > 0.02;   // an additive quad at zero opacity still costs a draw
+    // reason the Y_* stack exists. the quad spans the whole wall and mkWashTex
+    // fades it out at the roof line — a beam that quit a third of the way up
+    // read as a bright skirt, not as a light aimed at the tower.
+    b.wash.scale.set(b.w + 0.024, Math.max(0.001, h), b.d + 0.024);
+    // a lit tower does not need a beam: the windows already describe it, and the
+    // cold wash on top of them just fogs the facade. so the beam is what covers
+    // for the windows being off — it fades out as b.lit comes up (one frame
+    // behind, since b.lit is eased further down; invisible at 2.5/s).
+    const night = nightK(t);
+    b.wash.material.opacity = night * (1 - Math.min(1, b.lit / 0.5));
+    b.wash.visible = floodOn && b.wash.material.opacity > 0.02;   // an additive quad at zero opacity still costs a draw
+    b.pool.visible = floodOn && night > 0.02;                     // the puddle stays: it is a fixture on the paving, not a beam on the wall
     b.flood.scale.set(b.w, 1, b.d);
     b.pool.scale.set(b.w, 1, b.d);
   }
@@ -527,10 +572,13 @@ function updateBuilding(f, t, dt) {
   b.crane.visible = working;
   if (working) {
     const sh = h + 0.35;
+    // drive the loop off `off`, not off scaffold.children: the group also holds
+    // the beacon, and indexing children by i read past the poles into it
     const off = [[-1, -1], [1, -1], [1, 1], [-1, 1]];
-    b.scaffold.children.forEach((pole, i) => {
+    off.forEach(([ox, oz], i) => {
+      const pole = b.scaffold.children[i];
       pole.scale.set(0.045, sh, 0.045);
-      pole.position.set(off[i][0] * b.w * 0.58, sh / 2, off[i][1] * b.d * 0.58);
+      pole.position.set(ox * b.w * 0.58, sh / 2, oz * b.d * 0.58);
     });
     // the crane sweeps a circle around its own plot, so its reach is the one
     // part of a building that can end up over the street. at a mast on the plot
@@ -546,6 +594,17 @@ function updateBuilding(f, t, dt) {
     b.crane.children[1].position.set(mx + 0.22, mh, mz);
     b.crane.children[2].scale.set(0.1, 0.1, 0.1);
     b.crane.children[2].position.set(mx, mh - 0.1, mz);
+
+    // the jib is a unit box scaled 0.95 and centred at mx + 0.22, so its tip is
+    // at mx + 0.695 — read it off the scale, do not re-guess it
+    b.bMast.position.set(mx, mh + 0.06, mz);
+    b.bJib.position.set(mx + 0.69, mh, mz);
+    b.bScaf.position.set(-b.w * 0.58, sh + 0.04, -b.d * 0.58);
+    // hard on/off, not a fade: a beacon strobes. b.spin phases each rig so a
+    // repo with forty cranes does not blink like one christmas tree
+    b.bMast.visible = Math.sin(clock * 2.4 + b.spin) > 0.45;
+    const night = nightK(t) > 0.02;
+    b.bMast.children[1].visible = b.bJib.children[1].visible = b.bScaf.children[1].visible = night;
   }
 
   if (b.facade) {
@@ -1591,7 +1650,6 @@ function tick(ts) {
   const night = nightK(t);
   streetMat.emissiveIntensity = night;
   poolMat.opacity = night * 0.55 * (1 - weather.rain * 0.4);
-  washMat.opacity = night;
   floodPoolMat.opacity = night * 0.8 * (1 - weather.rain * 0.4);
   if (pools) pools.visible = night > 0.02;
 

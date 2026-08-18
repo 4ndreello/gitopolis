@@ -200,7 +200,7 @@ stays quiet.
 Every tower (`!house && floors > 8`, the same test that gives it a `cap`) carries three
 extra meshes, all children of its own group so they rise and die with it: `GEO_FLOOD`
 (four fixtures on the paving, lit by the glow texel like a lamp head), `GEO_WASH` (four
-quads hugging the walls, additive, `h / 3` tall) and `GEO_FLOODPOOL` (four puddles on the
+quads hugging the walls, additive, the full wall height) and `GEO_FLOODPOOL` (four puddles on the
 plate, the lamp's own pool texture in a colder colour). No `THREE.SpotLight` anywhere —
 a real light costs on every lit material in the scene and recompiles shaders when the
 count changes.
@@ -219,8 +219,41 @@ Two things were measured, not guessed:
   future additive layer ever "does not render", paint the material pure red for one
   build before touching the geometry: that is what proved the quads were in the right
   place all along.
+- **opacity is not the strength knob; `toneMapped` is.** ACES compresses a full-alpha
+  additive quad to ~0.8 and rolls the highlight off on top of that, and pushing opacity
+  past 1 does exactly nothing — GL clamps the `SRC_ALPHA` blend factor to 1. `washMat`
+  has `toneMapped: false`; that, not the alpha, is what finally made the beam carry.
+
+The beam covers the **whole** wall, and two things follow from that:
+
+- **the height and the gradient in `mkWashTex` only mean anything together.** The ramp
+  is 1.0 at the pavement, 0.62 at half height, 0 at the roof line. A full-height quad
+  whose alpha died at 0.3 looked identical to the old third-height one.
+- **a lit tower gets no beam.** `washMat` is cloned per tower and its opacity is
+  `night * (1 - min(1, b.lit / 0.5))`, so the wash is what covers for the windows being
+  *off*; once they are on, the windows describe the tower and the cold wash only fogs
+  them. The ground pool stays either way — it is a fixture on the paving, not a beam on
+  the wall. The clone is why `disposeBuilding` frees `b.wash.material`.
 
 `__toggle("flood")` A/Bs it in a live scene and `__city().floods` counts the lit towers.
+
+### Beacons: the rig has obstruction lights
+
+A crane under construction carries a red strobe on the mast head, a green steady out at
+the jib tip, and a red steady on one scaffold corner. Each is `mkBeacon()`: a
+`toneMapped: false` dot plus an additive halo `Sprite`. The dot alone is one pixel at
+home distance, so the halo is the half that reads; the halo is night-only, since additive
+over a daylit sky is a pale smudge. No `PointLight`, for the same reason there is no
+`SpotLight` above.
+
+The strobe is a hard on/off (`sin(clock * 2.4 + b.spin) > 0.45`), phased by `b.spin` so
+forty dirty files do not blink in unison. The jib beacon sits at `mx + 0.69` — read off
+the jib's own `0.95` scale and `mx + 0.22` centre, not guessed.
+
+The scaffold pole loop iterates `off`, **not** `scaffold.children`: the beacon lives in
+that group too, and indexing children by `i` walked past the four poles into it (a
+`Cannot read properties of undefined` every frame). Anything added to `scaffold` or
+`crane` has to leave the pole/jib indexing alone.
 
 ### src/props.js: procedural props
 
